@@ -1,0 +1,4 @@
+numpy
+polyscope
+gpytoolbox
+libigl
