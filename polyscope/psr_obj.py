@@ -14,7 +14,7 @@ if __name__ == "__main__":
 
     # Perform poisson reconstruction
     # The 0.3.7 API does things a bit differnetly: https://gpytoolbox.org/latest/point_cloud_to_mesh
-    V_rec, F_rec = gpy.point_cloud_to_mesh(V, N, method="PSR")
+    V_rec, F_rec = gpy.point_cloud_to_mesh(V, N, method="PSR", psr_depth=8)
     ps.register_surface_mesh("psr reconstruction", V_rec, F_rec, smooth_shade=True)
 
     ps.show()
