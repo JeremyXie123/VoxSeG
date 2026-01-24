@@ -10,7 +10,7 @@
 *.slo
 *.lo
 *.o
-*.obj
+# *.obj
 
 # Precompiled Headers
 *.gch
@@ -263,3 +263,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Ignore model and splat assets
+polyscope/models/
+polyscope/splats/
+*.obj
+*.ply
+
+# Ignore polyscope files
+.polyscope.ini
+imgui.ini
