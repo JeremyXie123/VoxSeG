@@ -2,12 +2,13 @@ import polyscope as ps
 import numpy as np
 import gpytoolbox as gpy
 import open3d as o3d
+import igl
 
 if __name__ == "__main__":
     ps.init()
     
     # Load vertices and faces from ply
-    V, F = gpy.read_mesh("splats/airplane/train/airplane_0001/point_cloud.ply")
+    V, F = gpy.read_mesh("splats/bathtub/train/bathtub_0001/point_cloud.ply")
     ps.register_point_cloud("ground truth", V)
     
     print("Vertices shape:", V.shape)
@@ -19,6 +20,7 @@ if __name__ == "__main__":
     pcd.points = o3d.utility.Vector3dVector(V.astype(np.float64))
     pcd.normals = o3d.utility.Vector3dVector(np.zeros((1, 3)))
     pcd.estimate_normals()
+    pcd.orient_normals_consistent_tangent_plane(100)
     N = np.asarray(pcd.normals, dtype=np.float64)
     
     # Perform poisson reconstruction

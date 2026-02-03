@@ -273,3 +273,6 @@ polyscope/splats/
 # Ignore polyscope files
 .polyscope.ini
 imgui.ini
+
+# Vscode configuration files
+.vscode/
