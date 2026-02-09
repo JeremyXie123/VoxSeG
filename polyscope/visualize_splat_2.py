@@ -1,3 +1,6 @@
+# Purpose of this file:
+# Load a gaussian splat into polyscope and visualize the bases representing the covariances of each guassian
+
 import polyscope as ps
 import numpy as np
 import gpytoolbox as gpy
@@ -41,21 +44,20 @@ def get_ellipsoid_mesh(V, S_linear, Q, R, density=10, scale=0.2):
 if __name__ == "__main__":
     ps.init()
     
-    # V, S, Q = load_splat_ply("splats/bathtub/train/bathtub_0001/point_cloud.ply")
-    V, S, Q = load_splat_ply(r"C:\Users\bloor\OneDrive\Desktop\CSC494\CSC494\polyscope\splats\truck\point_cloud\iteration_30000\point_cloud.ply")
+    V, S, Q = load_splat_ply("splats/bathtub/train/bathtub_0001/point_cloud.ply")
     R = Rotation.from_quat(Q).as_matrix().astype(np.float32)
     pc = ps.register_point_cloud("splats", V)
 
-    # S_linear = np.exp(S) # Some PLY files store logarithmic measurements
-    # A0 = R[:, :, 0] * S_linear[:, 0, None] # Scale first column of rotation matrix by S0
-    # A1 = R[:, :, 1] * S_linear[:, 1, None] # Scale second column of rotation matrix by S1
-    # A2 = R[:, :, 2] * S_linear[:, 2, None] # Scale third column of rotation matrix by S2
+    S_linear = np.exp(S) # Some PLY files store logarithmic measurements
+    A0 = R[:, :, 0] * S_linear[:, 0, None] # Scale first column of rotation matrix by S0
+    A1 = R[:, :, 1] * S_linear[:, 1, None] # Scale second column of rotation matrix by S1
+    A2 = R[:, :, 2] * S_linear[:, 2, None] # Scale third column of rotation matrix by S2
 
-    # pc.add_vector_quantity("axis_0", A0, enabled=True, color=(1, 0, 0))
-    # pc.add_vector_quantity("axis_1", A1, enabled=True, color=(0, 1, 0))
-    # pc.add_vector_quantity("axis_2", A2, enabled=True, color=(0, 0, 1))
+    pc.add_vector_quantity("axis_0", A0, enabled=True, color=(1, 0, 0))
+    pc.add_vector_quantity("axis_1", A1, enabled=True, color=(0, 1, 0))
+    pc.add_vector_quantity("axis_2", A2, enabled=True, color=(0, 0, 1))
 
-    # verts, faces = get_ellipsoid_mesh(V, S_linear, Q, R)
-    # ps.register_surface_mesh("splat_mesh", verts, faces)
+    verts, faces = get_ellipsoid_mesh(V, S_linear, Q, R)
+    ps.register_surface_mesh("splat_mesh", verts, faces)
 
     ps.show()

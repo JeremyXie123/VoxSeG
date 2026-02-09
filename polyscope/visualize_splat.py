@@ -1,3 +1,6 @@
+# Purpose of this file
+# Load and visualize a gaussian splat and see how well Poisson Surface Reconstruction performs
+
 import polyscope as ps
 import numpy as np
 import gpytoolbox as gpy

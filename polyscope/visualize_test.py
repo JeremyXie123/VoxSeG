@@ -1,3 +1,6 @@
+# Purpose of this file:
+# Test example provided by polyscope, familliarizing us with how to use it
+
 import polyscope as ps
 import numpy as np
 import igl
