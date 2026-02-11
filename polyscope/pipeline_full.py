@@ -112,27 +112,37 @@ def project_points(points_3d, viewmat, K):
 def run_sam_on_batch(render_colors, checkpoint_path, model_cfg, device):
     """Runs the Segment Anything Model on a batch of rendered images and returns the predicted masks"""
     # Initialize SAM 2.1
-    model = build_sam2(os.path.abspath(model_cfg), os.path.abspath(checkpoint_path), device=device)
+    model = build_sam2(os.path.abspath(model_cfg), checkpoint_path, device=device)
     predictor = SAM2ImagePredictor(model)
-    
-    input_point = np.array([[512, 512], [600, 600], [500, 500], [600, 500], [500, 600]])
-    input_label = np.array([1, 1, 1, 1, 1])
+
+    # Known 3D points on the interior of the object to segment (FOR THE TRUCK SPLAT)
+    interior_3d = torch.tensor([
+        [ 2.293, -0.090, 0.407], [ 2.347, -0.697, 0.407], 
+        [ 0.574, -0.697, 0.407], [ 0.628,  0.264, 0.407],
+        [-2.866, -0.658, 0.407], [-0.899, -0.580, 0.407], 
+        [-0.429, -0.138, 0.407]
+    ], dtype=torch.float32, device=device)
 
     batched_masks = []
-    with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+    
+    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         for i in range(render_colors.shape[0]):
-            print(f"Running SAM 2.1 on image {i+1}/{render_colors.shape[0]}...")
+            print(f"Processing View {i+1} with 7 projected points (Single Pass)...")
             
+            input_points = project_points(interior_3d, viewmats[i], Ks[i])
+            input_labels = np.ones(len(input_points), dtype=np.int32)
+
             # Convert render to format SAM 2.1 expects
             img_np = (render_colors[i].detach().clamp(0, 1) * 255).byte().cpu().numpy()
             predictor.set_image(img_np)
-            
-            # Run inference using only the fixed points
+
+            # Run inference using the backward projected 3d points
             masks, scores, _ = predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
+                point_coords=input_points,
+                point_labels=input_labels,
                 multimask_output=False,
             )
+            
             batched_masks.append(masks[0])
             
     return np.stack(batched_masks)
