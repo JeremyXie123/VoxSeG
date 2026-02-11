@@ -3,3 +3,4 @@ polyscope
 gpytoolbox
 libigl
 open3d
+gsplat
