@@ -10,6 +10,10 @@
 # - How to go from segmented images to new splat (and how do the metrics play in)
 #   - Differentiable rendering?
 
+# Example usage:
+# python pipeline_full.py --distance 5 --num_views 7
+# May need to update the SAM checkpoint and config paths (absolute paths)
+
 import math
 import torch
 import os
@@ -174,7 +178,7 @@ if __name__ == "__main__":
         backgrounds=torch.zeros((args.num_views, 3), device=device) # Black background
     )
 
-    # Export rendered images
+    # Export rendered images before SAM
     # for i in range(render_colors.shape[0]):
     #     img = render_colors[i].detach().float().clamp(0, 1).cpu().numpy()
     #     plt.imsave(os.path.join(args.output_render, f"view_{i:03d}.jpg"), img)
