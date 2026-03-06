@@ -193,14 +193,18 @@ def dirichlet_energy(phi):
     
     return (dx**2).mean() + (dy**2).mean() + (dz**2).mean()
 
-def render_phi_to_image(phi, viewmat, K, height, width, center, radius, sharpness, num_samples, device):
+def render_phi_to_image(phi, viewmats, Ks, height, width, center, radius, sharpness, device):
     """Renders the phi grid as an image (masks) using volume rendering."""
-    ray_origins, ray_dirs = construct_rays(viewmat, K, height, width, device)
-    points = sample_points_along_rays(ray_origins, ray_dirs, num_samples) # TODO: Will this still work for thicker objects?
-    phi_vals = query_phi_trilinear(phi, points, center, radius) # Trilinear interpolation of phi along ray
-    alpha = torch.sigmoid(-sharpness * phi_vals) # 1 - exp(-sigma*delta), but use sigmoid for stability
-    pred_mask = 1.0 - torch.prod(1.0 - alpha, dim=-1) # Compute cumulative opacity along the ray
-    return pred_mask
+    renderings = []
+    for i in range(len(viewmats)):
+        ray_origins, ray_dirs = construct_rays(viewmats[i], Ks[i], height, width, device)
+        # Use a higher sample count for cleaner evaluation
+        points = sample_points_along_rays(ray_origins, ray_dirs, num_samples=100) 
+        phi_vals = query_phi_trilinear(phi, points, center, radius)
+        alpha = torch.sigmoid(-sharpness * phi_vals)
+        mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)
+        renderings.append(mask.reshape(height, width))
+    return torch.stack(renderings)
 
 def plot_training_metrics(history, filename="training_metrics.png"):
     """
@@ -282,11 +286,10 @@ def visualize_with_polyscope(masked_rgbs, viewmats, Ks, phi, center, radius, iso
         cam = ps.register_camera_view(f"Cam_{i}", params)
         cam.set_widget_focal_length(0.05)
         cam.set_widget_color((0.5, 0.5, 0.5))
-        
-        # masked_rgbs[i] is now already (H, W, 3)
+
         cam.add_color_image_quantity(f"MaskedView_{i}", masked_rgbs[i], enabled=True, show_in_camera_billboard=True)
 
-    ps_cloud = ps.register_point_cloud("Cam-ctr", np.array(centers))
+    ps_cloud = ps.register_point_cloud("Cam-ctr", np.array(centers), enabled=False)
     ps_cloud.add_vector_quantity("Cam-forward", np.array(forwards), color=(0.8, 0.2, 0.2))
     ps_cloud.add_vector_quantity("Cam-right", np.array(rights), color=(0.2, 0.8, 0.2))
     ps_cloud.add_vector_quantity("Cam-up", np.array(ups), color=(0.2, 0.2, 0.8))
@@ -377,6 +380,17 @@ if __name__ == "__main__":
     masked_rgb_images = (rendered_images.detach().cpu().numpy() * masks_expanded).astype(np.float32)
     assert masked_rgb_images.ndim == 4 and masked_rgb_images.shape[-1] == 3, \
         f"Expected [N, H, W, 3], got {masked_rgb_images.shape}"
+    
+    original_renders = rendered_images.detach().cpu().numpy()
+    masks = target_masks
+
+    blended_images = []
+    for i in range(args.num_views):
+        tinted = np.zeros((*original_renders.shape[1:3], 3), dtype=np.float32)
+        tinted[..., 0] = 1.0
+        alpha_map = (masks[i] * 0.5)[..., None].astype(np.float32)
+        blended = original_renders[i] * (1.0 - alpha_map) + tinted * alpha_map
+        blended_images.append(blended)
 
     # Initialize voxel grid and optimizer
     phi = init_phi_grid(args.grid_resolution, device)
@@ -397,7 +411,11 @@ if __name__ == "__main__":
 
         current_iter_masks = []
         for view_idx in range(args.num_views):
-            pred_mask = render_phi_to_image(phi, viewmats[view_idx], Ks[view_idx], args.height, args.width, target_center, grid_radius, args.sharpness, args.num_samples, device)
+            ray_origins, ray_dirs = construct_rays(viewmats[view_idx], Ks[view_idx], args.height, args.width, device)
+            points = sample_points_along_rays(ray_origins, ray_dirs, args.num_samples)
+            phi_vals = query_phi_trilinear(phi, points, target_center, grid_radius)
+            alpha = torch.sigmoid(-args.sharpness * phi_vals)
+            pred_mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)
 
             if iter % 10 == 0:
                 mask_2d = pred_mask.reshape(args.height, args.width).detach().cpu().numpy()
@@ -444,7 +462,7 @@ if __name__ == "__main__":
     plot_training_metrics(history, filename="truck_optimization_log.png")
 
     print("Visualizing vertices in polyscope")
-    visualize_with_polyscope(masked_rgb_images, viewmats, Ks, phi, target_center, grid_radius, iso_level=args.iso_level)
+    visualize_with_polyscope(blended_images, viewmats, Ks, phi, target_center, grid_radius, iso_level=args.iso_level)
 
     print("Generating unseen views for evaluation...")
     num_test_views = args.num_test_views
@@ -459,10 +477,7 @@ if __name__ == "__main__":
         backgrounds=torch.zeros((num_test_views, 3), device=device)
     )
 
-    phi_renders = torch.stack([
-        render_phi_to_image(phi, test_viewmats[i], test_Ks[i], args.height, args.width, target_center, grid_radius, args.sharpness, args.num_samples, device).reshape(args.height, args.width)
-        for i in range(num_test_views)
-    ])
+    phi_renders = render_phi_to_image(phi, test_viewmats, test_Ks, args.height, args.width, target_center, grid_radius, args.sharpness, device)
 
     # Visualize the new views and SAM masks
     original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
