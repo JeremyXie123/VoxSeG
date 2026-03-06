@@ -1,0 +1,29 @@
+Traceback (most recent call last):
+  File "C:\Users\Jeremy\Desktop\CSC494\CSC494\polyscope\gaussian_test.py", line 1, in <module>
+    import torch
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\__init__.py", line 2016, in <module>
+    from torch import _VF as _VF, functional as functional  # usort: skip
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\functional.py", line 7, in <module>
+    import torch.nn.functional as F
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\nn\__init__.py", line 8, in <module>
+    from torch.nn.modules import *  # usort: skip # noqa: F403
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\nn\modules\__init__.py", line 2, in <module>
+    from .linear import Bilinear, Identity, LazyLinear, Linear  # usort: skip
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\nn\modules\linear.py", line 7, in <module>
+    from torch.nn import functional as F, init
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\nn\functional.py", line 4673, in <module>
+    def upsample_bilinear(  # noqa: F811
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\_jit_internal.py", line 1026, in _overload
+    _check_overload_body(func)
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\_jit_internal.py", line 995, in _check_overload_body
+    parsed_def = parse_def(func)
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\_sources.py", line 121, in parse_def
+    sourcelines, file_lineno, filename = get_source_lines_and_file(
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\site-packages\torch\_sources.py", line 23, in get_source_lines_and_file
+    filename = inspect.getsourcefile(obj)
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\inspect.py", line 826, in getsourcefile
+    if os.path.exists(filename):
+  File "C:\Users\Jeremy\miniconda3\envs\gaussian_viz\lib\genericpath.py", line 19, in exists
+    os.stat(path)
+KeyboardInterrupt
+^C

@@ -14,7 +14,6 @@ import torch
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 import torch.nn.functional as F
-from skimage import measure
 
 def load_ply(path, device):
     """Loads a PLY file and various information about it onto the given device"""
@@ -31,36 +30,42 @@ def load_ply(path, device):
     opacities = torch.sigmoid(torch.tensor(v['opacity'])).to(device)
     return means, scales, quats, colors, opacities
 
-def get_batch_viewmats(means, center, distance, num_views):
-    """Generates a batch of camera extrinsic matrices (viewmats) in a circular arrangement around the target center."""
-    # https://docs.gsplat.studio/main/conventions/data_conventions.html
+def get_batch_viewmats(means, center, distance, num_views, num_rotations=6, max_pitch=np.pi/4):
     viewmats = []
+    
     for i in range(num_views):
-        angle = (2 * np.pi / num_views) * i
-        # Cam pos in World space
-        cam_pos = center + torch.tensor([distance * np.cos(angle), 0, distance * np.sin(angle)], device=means.device)
+        yaw = (2 * np.pi * num_rotations / num_views) * i
+        pitch = (max_pitch / (num_views - 1)) * i
         
-        # +Z towards center
-        z = (center - cam_pos)
-        z /= torch.norm(z)
+        # 1. Removed the negative sign on pitch so cameras climb ABOVE the object
+        x = distance * np.cos(pitch) * np.cos(yaw)
+        y = distance * np.sin(-pitch)
+        z = distance * np.cos(pitch) * np.sin(yaw)
         
-        # +X to the right (cross product with world up)
+        cam_pos = center + torch.tensor([x, y, z], device=means.device)
+        
+        # Standard OpenCV LookAt (Right-handed, Y-Down, Z-Forward)
+        z_axis = (center - cam_pos)
+        z_axis /= torch.norm(z_axis)  # Forward (+Z)
+        
         up = torch.tensor([0, 1, 0], dtype=torch.float32, device=means.device)
-        x = torch.linalg.cross(z, up) 
-        x /= torch.norm(x)
         
-        # +Y up (cross product of forward and right)
-        y = torch.linalg.cross(x, z)
-        y /= torch.norm(y)
-
-        # Compute rotation matrix and translation
-        R = torch.stack([x, y, z], dim=0) 
+        # Right (+X) = Cross(World Up, Forward)
+        x_axis = torch.linalg.cross(up, z_axis) 
+        x_axis /= torch.norm(x_axis)
+        
+        # Down (+Y) = Cross(Forward, Right)
+        y_axis = torch.linalg.cross(z_axis, x_axis)
+        y_axis /= torch.norm(y_axis)
+        
+        R = torch.stack([x_axis, y_axis, z_axis], dim=0) 
         T = -R @ cam_pos
         
         mat = torch.eye(4, device=means.device)
         mat[:3, :3] = R
         mat[:3, 3] = T
         viewmats.append(mat)
+        
     return torch.stack(viewmats)
 
 def get_batch_Ks(focal, width, height, num_views, device):
@@ -240,6 +245,7 @@ import polyscope as ps
 def visualize_with_polyscope(masked_rgbs, viewmats, Ks, phi, center, radius, iso_level=0.0):
     """Visualizes the optimized phi grid and camera frustums using masked RGB views."""
     ps.init()
+    ps.set_up_dir("neg_y_up")
 
     # Phi Grid Registration
     bound_low = (center - radius).detach().cpu().numpy()
@@ -264,10 +270,13 @@ def visualize_with_polyscope(masked_rgbs, viewmats, Ks, phi, center, radius, iso
     centers, rights, ups, forwards = [], [], [], []
     for i in range(len(viewmats)):
         c2w = torch.linalg.inv(viewmats[i]).detach().cpu().numpy()
-        root = c2w[:3, 3] # Camera position in world space
-        look_dir = c2w[:3, 2] # Camera forward direction (negative Z in camera space)
-        up_dir = c2w[:3, 1] # Camera up direction (Y in camera space)
-        right_dir = c2w[:3, 0] # Camera right direction (X in camera space)
+        # 1. Extract raw coordinates
+        root = c2w[:3, 3] 
+        
+        # 2. OpenCV to OpenGL conversion
+        look_dir = c2w[:3, 2]   # Z is forward
+        up_dir = -c2w[:3, 1]    # Invert OpenCV Y (Down) to OpenGL Y (Up)
+        right_dir = c2w[:3, 0]  # X is right
 
         centers.append(root)
         rights.append(right_dir)
@@ -315,6 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta", type=float, default=1.0, help="Weight for smoothness regularization")
     parser.add_argument("--iso_level", type=float, default=0.0, help="Isosurface level for visualization")
     parser.add_argument("--num_test_views", type=int, default=5, help="Number of unseen views to render for evaluation")
+    parser.add_argument("--batch_size", type=int, default=4, help="Number of views to sample per optimization step")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
