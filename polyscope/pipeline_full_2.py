@@ -32,30 +32,35 @@ def load_ply(path, device):
     return means, scales, quats, colors, opacities
 
 def get_batch_viewmats(means, center, distance, num_views):
-    """Generates a batch of camera poses orbitting around the given center at the given distance, looking towards the center"""    
+    """Generates a batch of camera extrinsic matrices (viewmats) in a circular arrangement around the target center."""
+    # https://docs.gsplat.studio/main/conventions/data_conventions.html
     viewmats = []
     for i in range(num_views):
         angle = (2 * np.pi / num_views) * i
-        # Orbit around vertical axis (Y)
+        # Cam pos in World space
         cam_pos = center + torch.tensor([distance * np.cos(angle), 0, distance * np.sin(angle)], device=means.device)
         
-        # Compute camera extrinsics
-        z = (center - cam_pos) # Forward
+        # +Z towards center
+        z = (center - cam_pos)
         z /= torch.norm(z)
+        
+        # +X to the right (cross product with world up)
         up = torch.tensor([0, 1, 0], dtype=torch.float32, device=means.device)
-        x = torch.linalg.cross(up, z) # Rightward
+        x = torch.linalg.cross(z, up) 
         x /= torch.norm(x)
-        y = torch.linalg.cross(z, x) # Downward
+        
+        # +Y up (cross product of forward and right)
+        y = torch.linalg.cross(x, z)
         y /= torch.norm(y)
 
-        R = torch.stack([x, y, z], dim=0) # [3x3] Rotation matrix stacked row by row
-        T = -R @ cam_pos # [3x1] Translation
+        # Compute rotation matrix and translation
+        R = torch.stack([x, y, z], dim=0) 
+        T = -R @ cam_pos
         
-        mat = torch.eye(4, device=means.device) # [4x4] Homogenous transform
+        mat = torch.eye(4, device=means.device)
         mat[:3, :3] = R
         mat[:3, 3] = T
         viewmats.append(mat)
-        
     return torch.stack(viewmats)
 
 def get_batch_Ks(focal, width, height, num_views, device):
@@ -130,31 +135,28 @@ def run_sam_on_batch(rendered_images, checkpoint_path, model_cfg, interior_3d, d
 
 def init_phi_grid(resolution, device):
     """Initializes a voxel grid of the given resolution centered at the given point and with the given radius"""
-    nx, ny, nz = resolution, resolution, resolution
-    phi = torch.nn.Parameter(torch.randn((nz, ny, nx), device=device) * 0.1 + 0.5)
+    phi = torch.nn.Parameter(torch.randn((resolution, resolution, resolution), device=device) * 0.1 + 0.5)
     return phi
 
 def construct_rays(viewmat, K, height, width, device):
     """Generates rays (origin and direction) for each pixel in the image."""
-    # Create a grid of pixel coordinates
     y, x = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
     
-    # Invert the intrinsic matrix to go from pixels to camera space
+    # K maps [X_cam, Y_cam, Z_cam] to [u, v, 1], apply inverse to get camera directions from pixels
     inv_K = torch.linalg.inv(K)
-    pixels_homo = torch.stack([x, y, torch.ones_like(x)], dim=-1).float() # [H, W, 3]
-    
-    # Directions in camera space
-    cam_dirs = (inv_K @ pixels_homo.reshape(-1, 3).T).T # [H*W, 3]
-    
-    # Camera to World transform
+    pixels = torch.stack([x, y, torch.ones_like(x)], dim=-1).float() # [H, W, 3]
+    cam_dirs = pixels @ inv_K.T 
+
+    # Rotate ray directions based on viewmat rotation
     cam_to_world = torch.linalg.inv(viewmat)
-    ray_origins = cam_to_world[:3, 3].expand(cam_dirs.shape[0], -1) # Origin is camera center
-    
-    # Rotate directions to world space
-    ray_dirs = (cam_to_world[:3, :3] @ cam_dirs.T).T
+    ray_dirs = cam_dirs @ cam_to_world[:3, :3].T
     ray_dirs = ray_dirs / torch.norm(ray_dirs, dim=-1, keepdim=True)
     
-    return ray_origins, ray_dirs # [H*W, 3]
+    # Move ray origins based on viewmat translation
+    ray_origins = cam_to_world[:3, 3].expand(height, width, 3)
+    
+    # Return as [N, 3] for use with sampling function
+    return ray_origins.reshape(-1, 3), ray_dirs.reshape(-1, 3)
 
 def sample_points_along_rays(ray_origins, ray_dirs, num_samples, near=0.1, far=10.0):
     """Samples points along rays between near and far planes."""
@@ -191,27 +193,14 @@ def dirichlet_energy(phi):
     
     return (dx**2).mean() + (dy**2).mean() + (dz**2).mean()
 
-from skimage import measure
-
-def save_reconstruction_to_obj(phi, filename="truck_mesh.obj"):
-    """
-    Extracts a 3D manifold mesh where phi=0 and saves as an OBJ file.
-    """
-    grid_np = phi.detach().cpu().numpy()
-    
-    # Level=0.0 is our surface. Values < 0 are "inside" the truck.
-    verts, faces, normals, values = measure.marching_cubes(grid_np, level=0.0)
-
-    # 4. Write the OBJ file
-    with open(filename, 'w') as f:
-        f.write("# Truck Reconstruction Mesh\n")
-        for v in verts:
-            f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-        for face in faces:
-            # OBJ indices are 1-based, so we add 1 to the 0-based faces
-            f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
-    
-    print(f"Successfully saved {len(verts)} vertices to {filename}")
+def render_phi_to_image(phi, viewmat, K, height, width, center, radius, sharpness, num_samples, device):
+    """Renders the phi grid as an image (masks) using volume rendering."""
+    ray_origins, ray_dirs = construct_rays(viewmat, K, height, width, device)
+    points = sample_points_along_rays(ray_origins, ray_dirs, num_samples) # TODO: Will this still work for thicker objects?
+    phi_vals = query_phi_trilinear(phi, points, center, radius) # Trilinear interpolation of phi along ray
+    alpha = torch.sigmoid(-sharpness * phi_vals) # 1 - exp(-sigma*delta), but use sigmoid for stability
+    pred_mask = 1.0 - torch.prod(1.0 - alpha, dim=-1) # Compute cumulative opacity along the ray
+    return pred_mask
 
 def plot_training_metrics(history, filename="training_metrics.png"):
     """
@@ -242,6 +231,67 @@ def plot_training_metrics(history, filename="training_metrics.png"):
     print(f"Metrics graph saved to {filename}")
     plt.show()
 
+import polyscope as ps
+
+def visualize_with_polyscope(masked_rgbs, viewmats, Ks, phi, center, radius, iso_level=0.0):
+    """Visualizes the optimized phi grid and camera frustums using masked RGB views."""
+    ps.init()
+
+    # Phi Grid Registration
+    bound_low = (center - radius).detach().cpu().numpy()
+    bound_high = (center + radius).detach().cpu().numpy()
+    phi_data = np.flip(phi.detach().cpu().numpy().transpose(2, 1, 0), axis=1)
+    # phi_data = phi.detach().cpu().numpy()
+    
+    ps_grid = ps.register_volume_grid("Phi Grid", phi_data.shape, bound_low, bound_high)
+    ps_grid.add_scalar_quantity(
+        "phi", 
+        phi_data, 
+        defined_on='nodes', 
+        cmap='coolwarm', 
+        enabled=True,
+        enable_isosurface_viz=True, # Surface extraction
+        isosurface_level=iso_level, # Level set
+        isosurface_color=(0.2, 0.5, 0.8), # RGB color for the isosurface
+        enable_gridcube_viz=False # This tends to obscure the mesh, ignore.
+    )
+
+    # Camera Registration with Billboard Images
+    centers, rights, ups, forwards = [], [], [], []
+    for i in range(len(viewmats)):
+        c2w = torch.linalg.inv(viewmats[i]).detach().cpu().numpy()
+        root = c2w[:3, 3] # Camera position in world space
+        look_dir = c2w[:3, 2] # Camera forward direction (negative Z in camera space)
+        up_dir = c2w[:3, 1] # Camera up direction (Y in camera space)
+        right_dir = c2w[:3, 0] # Camera right direction (X in camera space)
+
+        centers.append(root)
+        rights.append(right_dir)
+        ups.append(up_dir)
+        forwards.append(look_dir)
+        
+        # Calculate FovY from focal length
+        focal_px = Ks[i, 0, 0].item()
+        fov_y = 2 * math.atan(args.height / (2 * focal_px)) * (180 / np.pi)
+        
+        params = ps.CameraParameters(
+            ps.CameraIntrinsics(fov_vertical_deg=fov_y, aspect=args.width/args.height),
+            ps.CameraExtrinsics(root=root, look_dir=look_dir, up_dir=up_dir)
+        )
+        
+        cam = ps.register_camera_view(f"Cam_{i}", params)
+        cam.set_widget_focal_length(0.05)
+        cam.set_widget_color((0.5, 0.5, 0.5))
+        
+        # masked_rgbs[i] is now already (H, W, 3)
+        cam.add_color_image_quantity(f"MaskedView_{i}", masked_rgbs[i], enabled=True, show_in_camera_billboard=True)
+
+    ps_cloud = ps.register_point_cloud("Cam-ctr", np.array(centers))
+    ps_cloud.add_vector_quantity("Cam-forward", np.array(forwards), color=(0.8, 0.2, 0.2))
+    ps_cloud.add_vector_quantity("Cam-right", np.array(rights), color=(0.2, 0.8, 0.2))
+    ps_cloud.add_vector_quantity("Cam-up", np.array(ups), color=(0.2, 0.2, 0.8))
+    ps.show()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=str, default="splats/truck.ply", help="Path to input PLY file")
@@ -260,6 +310,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-1, help="Learning rate for optimization")
     parser.add_argument("--sharpness", type=float, default=1.0, help="Sharpness parameter for converting phi to opacity")
     parser.add_argument("--beta", type=float, default=1.0, help="Weight for smoothness regularization")
+    parser.add_argument("--iso_level", type=float, default=0.0, help="Isosurface level for visualization")
+    parser.add_argument("--num_test_views", type=int, default=5, help="Number of unseen views to render for evaluation")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -283,8 +335,8 @@ if __name__ == "__main__":
     target_radius = (target_points_max - target_points_min).max().item() * 1.2 # Add some padding since internal points aren't all at the boundaries
 
     print(f"Target object information:")
-    print(f"  Center: {target_center.tolist()}")
-    print(f"  Radius: {target_radius:.4f}")
+    print(f"    Center: {target_center.tolist()}")
+    print(f"    Radius: {target_radius:.4f}")
 
     cam_radius = target_radius * args.cam_radius_mul
     print(f"Setting camera radius to {cam_radius:.4f}")
@@ -318,13 +370,13 @@ if __name__ == "__main__":
     print(f"Running SAM on {len(viewmats)} rendered views...")
     target_masks = run_sam_on_batch(rendered_images, args.sam_checkpoint, args.sam_config, interior_3d, device)
 
-    # Visualize the views and what SAM is predicting
-    masked_images = rendered_images.cpu().numpy() * target_masks[:, :, :, None]
+    # Save sam segmented images
     original = rendered_images.detach().float().clamp(0, 1).cpu().numpy()
-    masks_rgb = np.repeat(target_masks[:, :, :, None], 3, axis=-1).astype(float)
-    segmented = original * masks_rgb
-    stacked_images = np.concatenate([original, masks_rgb, segmented], axis=0)
-    visualize_batch_grid(stacked_images, num_cols=args.num_views, axes_pad=0.05)
+    masks = target_masks
+    masks_expanded = target_masks[..., None]
+    masked_rgb_images = (rendered_images.detach().cpu().numpy() * masks_expanded).astype(np.float32)
+    assert masked_rgb_images.ndim == 4 and masked_rgb_images.shape[-1] == 3, \
+        f"Expected [N, H, W, 3], got {masked_rgb_images.shape}"
 
     # Initialize voxel grid and optimizer
     phi = init_phi_grid(args.grid_resolution, device)
@@ -340,18 +392,12 @@ if __name__ == "__main__":
 
     all_debug_masks = []
     for iter in range(args.num_iters):
-        print(f"Iteration {iter+1}/{args.num_iters}...")
-
         total_loss = 0.0
         total_mask_loss = 0.0
 
         current_iter_masks = []
         for view_idx in range(args.num_views):
-            ray_origins, ray_dirs = construct_rays(viewmats[view_idx], Ks[view_idx], args.height, args.width, device)
-            points = sample_points_along_rays(ray_origins, ray_dirs, args.num_samples)
-            phi_vals = query_phi_trilinear(phi, points, target_center, grid_radius)
-            alpha = torch.sigmoid(-args.sharpness * phi_vals)
-            pred_mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)
+            pred_mask = render_phi_to_image(phi, viewmats[view_idx], Ks[view_idx], args.height, args.width, target_center, grid_radius, args.sharpness, args.num_samples, device)
 
             if iter % 10 == 0:
                 mask_2d = pred_mask.reshape(args.height, args.width).detach().cpu().numpy()
@@ -376,8 +422,14 @@ if __name__ == "__main__":
         total_loss.backward()
         optimizer.step()
 
-        print(f"Iter {iter}: Loss={total_loss.item():.4f}, Mask={total_mask_loss:.6f}, Smooth={smooth_term.item():.6f}")
-        print(f"Phi Range: [{phi.min().item():.4f}, {phi.max().item():.4f}]")
+        # Compute information about phi
+        phi_min = phi.min().item()
+        phi_max = phi.max().item()
+        phi_mean = phi.mean().item()
+        phi_median = torch.median(phi).item()
+        phi_midrange = (phi_min + phi_max) / 2.0
+        print(f"Iter {iter+1}/{args.num_iters}: Loss={total_loss.item():.4f}, Mask={total_mask_loss:.6f}, Smooth={smooth_term.item():.6f}")
+        print(f"Phi min/max/avg/med/mid: [{phi_min:.4f}, {phi_max:.4f}, {phi_mean:.4f}, {phi_median:.4f}, {phi_midrange:.4f}]")
 
         history['total_loss'].append(total_loss.item())
         history['mask_loss'].append(total_mask_loss)
@@ -391,5 +443,31 @@ if __name__ == "__main__":
     # Final step: Graph the results
     plot_training_metrics(history, filename="truck_optimization_log.png")
 
-    print("Extracting mesh and saving to OBJ...")
-    save_reconstruction_to_obj(phi, filename="truck_mesh.obj")
+    print("Visualizing vertices in polyscope")
+    visualize_with_polyscope(masked_rgb_images, viewmats, Ks, phi, target_center, grid_radius, iso_level=args.iso_level)
+
+    print("Generating unseen views for evaluation...")
+    num_test_views = args.num_test_views
+    test_Ks = get_batch_Ks(args.focal, args.width, args.height, num_test_views, device=device)
+    test_viewmats = get_batch_viewmats(means, target_center, torch.tensor(cam_radius, device=device), num_test_views)
+
+    test_renders, _, _ = rasterization(
+        means=means, quats=quats, scales=torch.exp(scales), opacities=opacities,
+        colors=colors[None, :, :].expand(num_test_views, -1, -1),
+        viewmats=test_viewmats, Ks=test_Ks, 
+        width=args.width, height=args.height, sh_degree=None, 
+        backgrounds=torch.zeros((num_test_views, 3), device=device)
+    )
+
+    phi_renders = torch.stack([
+        render_phi_to_image(phi, test_viewmats[i], test_Ks[i], args.height, args.width, target_center, grid_radius, args.sharpness, args.num_samples, device).reshape(args.height, args.width)
+        for i in range(num_test_views)
+    ])
+
+    # Visualize the new views and SAM masks
+    original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
+    phi_masks = phi_renders.detach().float().cpu().numpy()
+    phi_masks_rgb = np.repeat(phi_masks[:, :, :, None], 3, axis=-1)
+
+    combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
+    visualize_batch_grid(combined, num_cols=num_test_views)
