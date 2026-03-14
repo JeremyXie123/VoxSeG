@@ -1,5 +1,4 @@
-# Purpose of this file:
-# Continuation of other pipeline file, with the voxelization part added
+# Example command: python pipeline_full_2.py --num_views=300 --cam_radius_mul=0.8 --grid_radius_mul=0.5 --focal=550.0 --sharpness=5 --num_iters=300 --iso_level=0.5 --batch_size=16 --grid_resolution=128
 
 import math
 import torch
@@ -11,9 +10,36 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
 import argparse
 import torch
-from sam2.build_sam import build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
 import torch.nn.functional as F
+import gc
+import tempfile
+from PIL import Image
+from sam2.build_sam import build_sam2_video_predictor
+            
+def print_gpu_memory():
+    """Prints the current GPU memory usage in GB."""
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved = torch.cuda.memory_reserved() / 1024**3
+    total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    print(f"[GPU] Allocated: {allocated:.2f} GB | Reserved: {reserved:.2f} GB | Total: {total:.2f} GB")
+
+def get_size(obj):
+    """Computes the memory size of a tensor or a list/tuple."""
+    if isinstance(obj, (list, tuple)):
+        return sum(get_size(item) for item in obj)
+    
+    if torch.is_tensor(obj):
+        return obj.element_size() * obj.nelement()
+    
+    if isinstance(obj, np.ndarray):
+        return obj.nbytes
+    
+    return 0
+
+def print_tensor_memory(data, name):
+    """Reports memory usage in MiB."""
+    size_mib = get_size(data) / (1024**2)
+    print(f"{name} memory: {size_mib:.2f} MiB")
 
 def load_ply(path, device):
     """Loads a PLY file and various information about it onto the given device"""
@@ -30,14 +56,14 @@ def load_ply(path, device):
     opacities = torch.sigmoid(torch.tensor(v['opacity'])).to(device)
     return means, scales, quats, colors, opacities
 
-def get_batch_viewmats(means, center, distance, num_views, num_rotations=6, max_pitch=np.pi/4):
+def get_batch_viewmats(means, center, distance, num_views, num_rotations=4, max_pitch=np.pi/9):
     viewmats = []
     
     for i in range(num_views):
         yaw = (2 * np.pi * num_rotations / num_views) * i
-        pitch = (max_pitch / (num_views - 1)) * i
+        pitch = (max_pitch / (num_views - 1)) * i #- max_pitch/2
         
-        # 1. Removed the negative sign on pitch so cameras climb ABOVE the object
+        # Remove the negative sign on pitch so cameras climb ABOVE the object
         x = distance * np.cos(pitch) * np.cos(yaw)
         y = distance * np.sin(-pitch)
         z = distance * np.cos(pitch) * np.sin(yaw)
@@ -108,35 +134,45 @@ def project_points(points_3d, viewmat, K):
     pixel_points = pixel_points[:, :2] / pixel_points[:, 2:3]
     return pixel_points.detach().cpu().float().numpy()
 
-def run_sam_on_batch(rendered_images, checkpoint_path, model_cfg, interior_3d, device):
-    """Runs the Segment Anything Model on a batch of rendered images and returns the predicted masks"""
-    # Initialize SAM 2.1
-    model = build_sam2(os.path.abspath(model_cfg), checkpoint_path, device=device)
-    predictor = SAM2ImagePredictor(model)
-
-    batched_masks = []
+def run_sam_video_on_batch(rendered_images, checkpoint_path, model_cfg, interior_3d, viewmats, Ks, device):
+    """
+    Runs SAM 2.1 Video Predictor by pointing it to a high-speed temp directory.
+    """
+    print("Initializing SAM 2.1 Video Predictor...")
+    predictor = build_sam2_video_predictor(os.path.abspath(model_cfg), checkpoint_path, device=device)
     
-    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        for i in range(rendered_images.shape[0]):
-            print(f"Processing View {i+1} with 7 projected points (Single Pass)...")
-            
-            input_points = project_points(interior_3d, viewmats[i], Ks[i])
-            input_labels = np.ones(len(input_points), dtype=np.int32)
-
-            # Convert render to format SAM 2.1 expects
+    # SAM's video model requires a directory of images as input. Helps with automatic cleanup and running in RAM?
+    with tempfile.TemporaryDirectory() as temp_dir:
+        print(f"Extracting {len(rendered_images)} frames...")
+        
+        for i in range(len(rendered_images)):
             img_np = (rendered_images[i].detach().clamp(0, 1) * 255).byte().cpu().numpy()
-            predictor.set_image(img_np)
+            img_pil = Image.fromarray(img_np)
+            img_pil.save(os.path.join(temp_dir, f"{i:05d}.jpg"), quality=85) # Reduced quality saves I/O time
 
-            # Run inference using the backward projected 3d points
-            masks, _, _ = predictor.predict(
-                point_coords=input_points,
-                point_labels=input_labels,
-                multimask_output=False,
-            )
-            
-            batched_masks.append(masks[0])
-            
-    return np.stack(batched_masks)
+        # Initialize the video inference state
+        print("Initializing SAM state from folder...")
+        inference_state = predictor.init_state(video_path=temp_dir)
+        
+        # Add interior points as an initial prompt
+        input_points = project_points(interior_3d, viewmats[0], Ks[0])
+        input_labels = np.ones(len(input_points), dtype=np.int32)
+        
+        _, _, _ = predictor.add_new_points_or_box(
+            inference_state=inference_state, frame_idx=0, obj_id=1,
+            points=input_points, labels=input_labels
+        )
+
+        # Propagate
+        print("Propagating masks...")
+        total_frames = len(rendered_images)
+        final_masks = [None] * total_frames 
+
+        for out_frame_idx, _, out_mask_logits in predictor.propagate_in_video(inference_state):
+            mask = (out_mask_logits[0, 0] > 0.0).cpu().numpy()
+            final_masks[out_frame_idx] = mask
+
+        return np.stack(final_masks)
 
 def init_phi_grid(resolution, device):
     """Initializes a voxel grid of the given resolution centered at the given point and with the given radius"""
@@ -250,8 +286,16 @@ def visualize_with_polyscope(masked_rgbs, viewmats, Ks, phi, center, radius, iso
     # Phi Grid Registration
     bound_low = (center - radius).detach().cpu().numpy()
     bound_high = (center + radius).detach().cpu().numpy()
-    phi_data = np.flip(phi.detach().cpu().numpy().transpose(2, 1, 0), axis=1)
-    # phi_data = phi.detach().cpu().numpy()
+    phi_data = phi.detach().cpu().numpy().transpose(2, 1, 0)
+    
+    mask = phi_data < iso_level
+    idx = np.argwhere(mask) # (N,3) voxel indices
+    res = phi_data.shape[0] # grid resolution
+    points_local = (idx / (res - 1)) * 2 - 1 # map [0,res-1] → [-1,1]
+    points_world = center.detach().cpu().numpy() + points_local * radius # Map from local [-1,1] to world
+
+    ps_pts = ps.register_point_cloud("Phi Voxel Nodes", points_world, radius=0.0025, color=(1.0, 0.9, 0.1))
+    ps_pts.add_scalar_quantity("phi_val", phi_data[mask], cmap='coolwarm')
     
     ps_grid = ps.register_volume_grid("Phi Grid", phi_data.shape, bound_low, bound_high)
     ps_grid.add_scalar_quantity(
@@ -304,6 +348,33 @@ def visualize_with_polyscope(masked_rgbs, viewmats, Ks, phi, center, radius, iso
     ps_cloud.add_vector_quantity("Cam-up", np.array(ups), color=(0.2, 0.2, 0.8))
     ps.show()
 
+def render_in_chunks(means, quats, scales, opacities, colors, viewmats, Ks, width, height, sh_degree, backgrounds, chunk_size=50):
+    """Renders the given views in batches to manage GPU memory usage. Huge batches tend to allocate memory for all views at once"""
+    all_renders = []
+    num_views = len(viewmats)
+    
+    for i in range(0, num_views, chunk_size):
+        end = min(i + chunk_size, num_views)
+        print(f"Rendering batch {i} to {end}...")
+        
+        # Rasterize just this chunk
+        renders, alphas, meta = rasterization(
+            means=means, quats=quats, scales=scales, opacities=opacities,
+            colors=colors[i:end], # Slice the colors for this batch
+            viewmats=viewmats[i:end], 
+            Ks=Ks[i:end],
+            width=width, height=height,
+            sh_degree=sh_degree,
+            backgrounds=backgrounds[i:end]
+        )
+        
+        all_renders.append(renders)
+        del renders, alphas, meta # Explicitly free as memory saving measure
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+    return torch.cat(all_renders, dim=0)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=str, default="splats/truck.ply", help="Path to input PLY file")
@@ -331,7 +402,11 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_render, exist_ok=True)
 
+    print_gpu_memory()
+
     means, scales, quats, colors, opacities = load_ply(args.input, device)
+
+    print_gpu_memory()
 
     # Known 3D points on the interior of the object to segment (FOR THE TRUCK SPLAT)
     interior_3d = torch.tensor([
@@ -362,10 +437,11 @@ if __name__ == "__main__":
 
     # Compute camera extrinsics
     viewmats = get_batch_viewmats(means, target_center, torch.tensor(cam_radius, device=device, dtype=torch.float32), num_views=args.num_views)
+    print_gpu_memory()
 
     # Perform rasterization on the gaussian splat
     print(f"Rendering {len(viewmats)} views...")
-    rendered_images, alphas, meta = rasterization(
+    rendered_images = render_in_chunks(
         means=means,
         quats=quats,
         scales=torch.exp(scales), # Scales stored logarithmically
@@ -379,17 +455,17 @@ if __name__ == "__main__":
         backgrounds=torch.zeros((args.num_views, 3), device=device) # Black background
     )
 
+    print_gpu_memory()
+
     # Run SAM on the batch of rendered images
     print(f"Running SAM on {len(viewmats)} rendered views...")
-    target_masks = run_sam_on_batch(rendered_images, args.sam_checkpoint, args.sam_config, interior_3d, device)
+    target_masks = run_sam_video_on_batch(rendered_images, args.sam_checkpoint, args.sam_config, interior_3d, viewmats, Ks, device)
 
     # Save sam segmented images
     original = rendered_images.detach().float().clamp(0, 1).cpu().numpy()
     masks = target_masks
     masks_expanded = target_masks[..., None]
     masked_rgb_images = (rendered_images.detach().cpu().numpy() * masks_expanded).astype(np.float32)
-    assert masked_rgb_images.ndim == 4 and masked_rgb_images.shape[-1] == 3, \
-        f"Expected [N, H, W, 3], got {masked_rgb_images.shape}"
     
     original_renders = rendered_images.detach().cpu().numpy()
     masks = target_masks
@@ -402,9 +478,22 @@ if __name__ == "__main__":
         blended = original_renders[i] * (1.0 - alpha_map) + tinted * alpha_map
         blended_images.append(blended)
 
+    print("Cleaning up rasterized memory")
+    del rendered_images
+    gc.collect()
+    torch.cuda.empty_cache()
+
     # Initialize voxel grid and optimizer
     phi = init_phi_grid(args.grid_resolution, device)
     optimizer = torch.optim.Adam([phi], lr=args.lr)
+
+    print("Memory Report before optimization:")
+    print_gpu_memory()
+    print_tensor_memory(phi, "Phi Grid")
+    print_tensor_memory(viewmats, "View Matrices")
+    print_tensor_memory(Ks, "Camera Intrinsics")
+    print_tensor_memory(target_masks, "SAM Target Masks")
+    print_tensor_memory(blended_images, "Blended Images")
 
     print(f"Starting optimization for {args.num_iters} iterations...")
     
@@ -414,22 +503,21 @@ if __name__ == "__main__":
         'smooth_loss': []
     }
 
-    all_debug_masks = []
+    # Per epochs
     for iter in range(args.num_iters):
         total_loss = 0.0
         total_mask_loss = 0.0
 
-        current_iter_masks = []
-        for view_idx in range(args.num_views):
+        # Stochastic batching
+        batch_indices = torch.randperm(args.num_views)[:args.batch_size].tolist()
+        for view_idx in batch_indices:
+            # Perform volumetric rendering of the current phi grid to get predicted mask
+            # print_gpu_memory()
             ray_origins, ray_dirs = construct_rays(viewmats[view_idx], Ks[view_idx], args.height, args.width, device)
             points = sample_points_along_rays(ray_origins, ray_dirs, args.num_samples)
             phi_vals = query_phi_trilinear(phi, points, target_center, grid_radius)
             alpha = torch.sigmoid(-args.sharpness * phi_vals)
             pred_mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)
-
-            if iter % 10 == 0:
-                mask_2d = pred_mask.reshape(args.height, args.width).detach().cpu().numpy()
-                current_iter_masks.append(mask_2d)
 
             # Compute BCE loss with SAM mask as target
             target = torch.from_numpy(target_masks[view_idx]).float().to(device).view(-1)
@@ -438,8 +526,6 @@ if __name__ == "__main__":
             view_loss = mask_loss / args.num_views
             total_loss += view_loss
             total_mask_loss += view_loss.item()
-
-        all_debug_masks.append(current_iter_masks)
 
         # Add smoothness regularization
         smooth_term = args.beta * dirichlet_energy(phi)
@@ -458,6 +544,7 @@ if __name__ == "__main__":
         phi_midrange = (phi_min + phi_max) / 2.0
         print(f"Iter {iter+1}/{args.num_iters}: Loss={total_loss.item():.4f}, Mask={total_mask_loss:.6f}, Smooth={smooth_term.item():.6f}")
         print(f"Phi min/max/avg/med/mid: [{phi_min:.4f}, {phi_max:.4f}, {phi_mean:.4f}, {phi_median:.4f}, {phi_midrange:.4f}]")
+        print_gpu_memory()
 
         history['total_loss'].append(total_loss.item())
         history['mask_loss'].append(total_mask_loss)
@@ -468,7 +555,7 @@ if __name__ == "__main__":
     # flattened_masks = [mask for iter_row in all_debug_masks for mask in iter_row]
     # visualize_batch_grid(flattened_masks, num_cols=args.num_views)
 
-    # Final step: Graph the results
+    # Graph the results
     plot_training_metrics(history, filename="truck_optimization_log.png")
 
     print("Visualizing vertices in polyscope")
