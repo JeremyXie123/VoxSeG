@@ -1,3 +1,5 @@
+from time import time
+
 import torch
 import torch.nn.functional as F
 
@@ -61,8 +63,9 @@ def optimize_voxel_grid(seg_result: SegmentationResult, cams: CameraState, args,
 
     print(f"Starting optimization for {args.num_iters} iterations...")
 
-    history = {'total_loss': [], 'mask_loss': [], 'smooth_loss': []}
+    history = {'total_loss': [], 'mask_loss': [], 'smooth_loss': [], 'time': []}
     
+    start_time = time.time()
     for iter in range(args.num_iters):
         total_loss = 0.0
         total_mask_loss = 0.0
@@ -108,6 +111,7 @@ def optimize_voxel_grid(seg_result: SegmentationResult, cams: CameraState, args,
         history['total_loss'].append(total_loss.item())
         history['mask_loss'].append(total_mask_loss)
         history['smooth_loss'].append(smooth_term.item())
+        history['time'].append(time() - start_time)
 
     print("Optimization complete.")
     return phi, history
