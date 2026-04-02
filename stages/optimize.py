@@ -43,7 +43,7 @@ def render_phi_to_image(phi: torch.Tensor, cams: CameraState, args, device: torc
     renderings = []
     for i in range(len(cams.viewmats)):
         ray_origins, ray_dirs = construct_rays(cams.viewmats[i], cams.Ks[i], args.height, args.width, device)
-        points = sample_points_along_rays(ray_origins, ray_dirs, num_samples=100) 
+        points = sample_points_along_rays(ray_origins, ray_dirs, num_samples=args.num_test_samples) 
         phi_vals = query_phi_trilinear(phi, points, cams.target_center, cams.grid_radius)
         alpha = torch.sigmoid(-args.sharpness * phi_vals)
         mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)

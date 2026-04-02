@@ -29,7 +29,8 @@ if __name__ == "__main__":
     parser.add_argument("--sharpness", type=float, default=1.0, help="Sharpness parameter for converting phi to opacity")
     parser.add_argument("--beta", type=float, default=1.0, help="Weight for smoothness regularization")
     parser.add_argument("--iso_level", type=float, default=0.0, help="Isosurface level for visualization")
-    parser.add_argument("--num_test_views", type=int, default=5, help="Number of unseen views to render for evaluation")
+    parser.add_argument("--num_test_views", type=int, default=7, help="Number of unseen views to render for evaluation")
+    parser.add_argument("--num_test_samples", type=int, default=100, help="Number of samples per ray for test view rendering")
     parser.add_argument("--batch_size", type=int, default=4, help="Number of views to sample per optimization step")
     args = parser.parse_args()
 
