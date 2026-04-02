@@ -1,4 +1,5 @@
 import math
+import os
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -45,12 +46,15 @@ def plot_training_metrics(history: dict, filename="training_metrics.png"):
 
     plt.title('Voxel Optimization Metrics')
     fig.tight_layout()
+    os.makedirs("graphs", exist_ok=True)
     plt.savefig(filename)
     print(f"Metrics graph saved to {filename}")
     plt.show()
 
 def visualize_with_polyscope(masked_rgbs: list[np.ndarray], cams: CameraState, phi: torch.Tensor, args):
     """Visualizes the optimized phi grid and camera frustums using masked RGB views."""
+    ps.set_window_size(1920, 1080*0.75)
+
     ps.init()
     ps.set_up_dir("neg_y_up")
 
