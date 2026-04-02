@@ -1,4 +1,4 @@
-from time import time
+import time
 
 import torch
 import torch.nn.functional as F
@@ -83,7 +83,16 @@ def optimize_voxel_grid(seg_result: SegmentationResult, cams: CameraState, args,
 
             # Compute BCE loss with SAM mask as target
             target = torch.from_numpy(seg_result.masks[view_idx]).float().to(device).view(-1)
-            mask_loss = F.binary_cross_entropy(pred_mask, target)
+            
+            if args.metric == "bce":
+                mask_loss = F.binary_cross_entropy(pred_mask, target)
+            elif args.metric == "mse":
+                mask_loss = F.mse_loss(pred_mask, target)
+            elif args.metric == "kl":
+                eps = 1e-7
+                p = torch.stack([pred_mask, 1 - pred_mask], dim=-1).clamp(eps, 1.0 - eps)
+                q = torch.stack([target, 1 - target], dim=-1).clamp(eps, 1.0 - eps)
+                mask_loss = F.kl_div(p.log(), q, reduction='batchmean')
 
             view_loss = mask_loss / args.num_views
             total_loss += view_loss
@@ -111,7 +120,7 @@ def optimize_voxel_grid(seg_result: SegmentationResult, cams: CameraState, args,
         history['total_loss'].append(total_loss.item())
         history['mask_loss'].append(total_mask_loss)
         history['smooth_loss'].append(smooth_term.item())
-        history['time'].append(time() - start_time)
+        history['time'].append(time.time() - start_time)
 
     print("Optimization complete.")
     return phi, history

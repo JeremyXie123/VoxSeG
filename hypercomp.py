@@ -2,13 +2,64 @@ import argparse
 import os
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
 
 from core.splat_io import load_ply, print_gpu_memory
-from core.camera import CameraState, setup_camera_geometry, get_batch_Ks, get_batch_viewmats
+from core.camera import CameraState, setup_camera_geometry
 from stages.rendering import render_splat_views
 from stages.segmentation import generate_sam_masks
-from stages.optimize import optimize_voxel_grid, render_phi_to_image
-from stages.evaluation import visualize_with_polyscope, plot_training_metrics, visualize_batch_grid
+from stages.optimize import optimize_voxel_grid
+
+def plot_beta_comparison(all_histories, input_filename):
+    """
+    Plots Mask Loss, Smoothness Loss, and Cumulative Time curves 
+    for multiple beta values in a 3-high vertical stack.
+    """
+    # Create a 3x1 grid of subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True)
+    
+    beta_keys = list(all_histories.keys())
+    colors = plt.cm.viridis(np.linspace(0, 1, len(beta_keys)))
+
+    for i, beta in enumerate(beta_keys):
+        history = all_histories[beta]
+        iters = range(len(history['mask_loss']))
+        
+        # 1. Top Plot: Mask BCE Loss (Data Fidelity)
+        ax1.plot(iters, history['mask_loss'], color=colors[i], 
+                 label=f'beta={beta}', linewidth=2)
+        
+        # 2. Middle Plot: Smoothness Loss (Regularization)
+        ax2.plot(iters, history['smooth_loss'], color=colors[i], 
+                 label=f'beta={beta}', linestyle='--')
+        
+        # 3. Bottom Plot: Cumulative Time (Performance)
+        ax3.plot(iters, history['time'], color=colors[i], 
+                 label=f'beta={beta}', linestyle='-.')
+
+    # Formatting Top Plot (Mask Loss)
+    ax1.set_ylabel('Mask BCE Loss')
+    ax1.set_title(f'Convergence Comparison: {input_filename}')
+    ax1.legend(loc='upper right', ncol=2)
+    ax1.grid(True, alpha=0.3)
+
+    # Formatting Middle Plot (Smoothness)
+    ax2.set_ylabel('Smoothness Loss')
+    ax2.set_title('Regularization Magnitude')
+    ax2.grid(True, alpha=0.3)
+
+    # Formatting Bottom Plot (Time)
+    ax3.set_ylabel('Time (seconds)')
+    ax3.set_xlabel('Iteration')
+    ax3.set_title('Computation Time')
+    ax3.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    os.makedirs("graphs", exist_ok=True)
+    out_path = f"graphs/{input_filename}_beta_sweep_full.png"
+    plt.savefig(out_path)
+    print(f"Full sweep visualization saved to {out_path}")
+    plt.show()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -36,9 +87,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     input_filename = os.path.splitext(os.path.basename(args.input))[0]
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print_gpu_memory()
 
     interior_3d = torch.tensor([
         [ 2.293, -0.090, 0.407], [ 2.347, -0.697, 0.407], 
@@ -47,43 +96,36 @@ if __name__ == "__main__":
         [-0.429, -0.138, 0.407]
     ], dtype=torch.float32, device=device)
 
-    # --- 1. CORE PIPELINE ---
+    # --- 1. SETUP (Run once per script) ---
     splats = load_ply(args.input, device)
     cams = setup_camera_geometry(interior_3d, splats.means, args, device)
     
+    # We only need to render and segment once; the masks remain the same for all betas
     rendered_images = render_splat_views(splats, cams, args)
     seg_result = generate_sam_masks(rendered_images, interior_3d, cams, args, device)
     
-    phi_grid, history = optimize_voxel_grid(seg_result, cams, args, device)
+    # --- 2. BETA SWEEP ---
+    metric_values = ["bce", "mse", "kl"]  # Example metrics to sweep over; replace with actual beta values if needed
+    all_histories = {}
 
-    # --- 2. EVALUATION & VISUALIZATION ---
-    print("Optimization complete. Visualizing training history...")
-    plot_training_metrics(history, filename=f"graphs/{input_filename}_optimization_log.png")
+    for x in metric_values:
+        print(f"\n" + "="*40)
+        print(f"STARTING OPTIMIZATION: Metric = {x}")
+        print("="*40)
+        
+        # Manually override beta in args for the optimizer
+        args.metric = x
+        
+        # optimize_voxel_grid initializes a fresh phi grid internally each time it is called
+        phi_grid, history = optimize_voxel_grid(seg_result, cams, args, device)
+        all_histories[x] = {k: [float(v) for v in l] for k, l in history.items()}
 
-    print("Visualizing vertices in polyscope...")
-    visualize_with_polyscope(seg_result.blended_images, cams, phi_grid, args)
+        del phi_grid
+        del history
+        torch.cuda.empty_cache() # Frees the "Reserved" memory back to the OS
+        import gc
+        gc.collect() # Forces Python to clear orphaned objects
+        print_gpu_memory()
 
-    print("Generating unseen views for evaluation...")
-    test_Ks = get_batch_Ks(args.focal, args.width, args.height, args.num_test_views, device)
-    test_viewmats = get_batch_viewmats(splats.means, cams.target_center, cams.cam_radius, args.num_test_views)
-    
-    # Bundle the new views into our structured CameraState
-    test_cams = CameraState(
-        target_center=cams.target_center,
-        target_radius=cams.target_radius,
-        cam_radius=cams.cam_radius,
-        grid_radius=cams.grid_radius,
-        viewmats=test_viewmats,
-        Ks=test_Ks
-    )
-
-    test_renders = render_splat_views(splats, test_cams, args, chunk_size=args.num_test_views)
-    phi_renders = render_phi_to_image(phi_grid, test_cams, args, device)
-
-    # Concat and visualize
-    original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
-    phi_masks = phi_renders.detach().float().cpu().numpy()
-    phi_masks_rgb = np.repeat(phi_masks[:, :, :, None], 3, axis=-1)
-
-    combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
-    visualize_batch_grid(combined, num_cols=args.num_test_views)
+    # --- 3. PLOTTING ---
+    plot_beta_comparison(all_histories, input_filename)
