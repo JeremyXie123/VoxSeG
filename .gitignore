@@ -284,3 +284,5 @@ splats/
 # Ignore CUDA
 *.run
 *.sh
+
+*.png
