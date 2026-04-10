@@ -91,13 +91,7 @@ class DenseGrid(PhiGrid):
         total_mask_loss = 0.0
 
         for view_idx in batch_indices:
-            ray_origins, ray_dirs = construct_rays(cams.viewmats[view_idx], cams.Ks[view_idx], self.args.height, self.args.width, self.device)
-            t_vals = torch.linspace(0.1, 10.0, self.args.num_samples, device=self.device)
-            points = ray_origins[:, None, :] + ray_dirs[:, None, :] * t_vals[None, :, None]
-            phi_vals = self.query(points, cams)
-            alpha = torch.sigmoid(-self.args.sharpness * phi_vals)
-            pred_mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)
-
+            pred_mask = self.render_mask(view_idx, cams, self.args.num_samples)
             target = torch.from_numpy(seg_result.masks[view_idx]).float().to(self.device).view(-1)
             mask_loss = self._compute_mask_loss(pred_mask, target)
             view_loss = mask_loss / self.args.num_views
