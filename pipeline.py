@@ -7,7 +7,7 @@ from core.splat_io import load_ply, print_gpu_memory
 from core.camera import CameraState, setup_camera_geometry, get_batch_Ks, get_batch_viewmats
 from stages.rendering import render_splat_views
 from stages.segmentation import generate_sam_masks
-from stages.optimize import PhiGrid, DenseGrid, SparseAdaptiveGrid, optimize_voxel_grid
+from stages.optimize import PhiGrid, DenseGrid, optimize_voxel_grid
 from stages.evaluation import visualize_with_polyscope, plot_training_metrics, visualize_batch_grid
 
 if __name__ == "__main__":
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     rendered_images = render_splat_views(splats, cams, args)
     seg_result = generate_sam_masks(rendered_images, interior_3d, cams, args, device)
     
-    phi_grid = DenseGrid(args, device) if args.grid_type == "dense" else SparseAdaptiveGrid(args, device, cams)
+    phi_grid = DenseGrid(args, device) # if args.grid_type == "dense" else SparseAdaptiveGrid(args, device, cams)
     history = optimize_voxel_grid(phi_grid, seg_result, cams, args, device)
 
     # --- 2. EVALUATION & VISUALIZATION ---
@@ -71,22 +71,24 @@ if __name__ == "__main__":
     test_viewmats = get_batch_viewmats(splats.means, cams.target_center, cams.cam_radius, args.num_test_views)
     
     # Bundle the new views into our structured CameraState
-    # test_cams = CameraState(
-    #     target_center=cams.target_center,
-    #     target_radius=cams.target_radius,
-    #     cam_radius=cams.cam_radius,
-    #     grid_radius=cams.grid_radius,
-    #     viewmats=test_viewmats,
-    #     Ks=test_Ks
-    # )
+    test_cams = CameraState(
+        target_center=cams.target_center,
+        target_radius=cams.target_radius,
+        cam_radius=cams.cam_radius,
+        grid_radius=cams.grid_radius,
+        viewmats=test_viewmats,
+        Ks=test_Ks
+    )
 
-    # test_renders = render_splat_views(splats, test_cams, args, chunk_size=args.num_test_views)
-    # phi_renders = render_phi_to_image(phi_grid, test_cams, args, device)
+    test_renders = render_splat_views(splats, test_cams, args, chunk_size=args.num_test_views)
 
-    # # Concat and visualize
-    # original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
-    # phi_masks = phi_renders.detach().float().cpu().numpy()
-    # phi_masks_rgb = np.repeat(phi_masks[:, :, :, None], 3, axis=-1)
+    phi_masks = torch.stack([phi_grid.render_mask(i, test_cams, args.num_test_samples) for i in range(args.num_test_views)])
+    phi_renders = phi_masks.view(args.num_test_views, args.height, args.width)
 
-    # combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
-    # visualize_batch_grid(combined, num_cols=args.num_test_views)
+    # Concat and visualize
+    original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
+    phi_masks = phi_renders.detach().float().cpu().numpy()
+    phi_masks_rgb = np.repeat(phi_masks[:, :, :, None], 3, axis=-1)
+
+    combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
+    visualize_batch_grid(combined, num_cols=args.num_test_views)
