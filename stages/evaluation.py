@@ -32,16 +32,20 @@ def plot_training_metrics(history: dict, filename="training_metrics.png"):
     iters = range(len(history['total_loss']))
     fig, ax1 = plt.subplots(figsize=(10, 6))
 
+    # Convert tensor values to numpy, moving to CPU if needed
+    mask_loss_vals = [v.detach().cpu().numpy() if torch.is_tensor(v) else v for v in history['mask_loss']]
+    smooth_loss_vals = [v.detach().cpu().numpy() if torch.is_tensor(v) else v for v in history['smooth_loss']]
+
     color = 'tab:red'
     ax1.set_xlabel('Iteration')
     ax1.set_ylabel('Mask BCE Loss', color=color)
-    ax1.plot(iters, history['mask_loss'], color=color, label='Mask Loss', linewidth=2)
+    ax1.plot(iters, mask_loss_vals, color=color, label='Mask Loss', linewidth=2)
     ax1.tick_params(axis='y', labelcolor=color)
 
     ax2 = ax1.twinx()
     color = 'tab:blue'
     ax2.set_ylabel('Smoothness Loss', color=color)
-    ax2.plot(iters, history['smooth_loss'], color=color, label='Smoothness', linestyle='--')
+    ax2.plot(iters, smooth_loss_vals, color=color, label='Smoothness', linestyle='--')
     ax2.tick_params(axis='y', labelcolor=color)
 
     plt.title('Voxel Optimization Metrics')
@@ -51,8 +55,15 @@ def plot_training_metrics(history: dict, filename="training_metrics.png"):
     print(f"Metrics graph saved to {filename}")
     plt.show()
 
-def visualize_with_polyscope(masked_rgbs: list[np.ndarray], cams: CameraState, phi: torch.Tensor, args):
-    """Visualizes the optimized phi grid and camera frustums using masked RGB views."""
+def visualize_with_polyscope(masked_rgbs: list[np.ndarray], cams: CameraState, phi_grid, args):
+    """Visualizes the optimized phi grid and camera frustums using masked RGB views.
+    
+    Args:
+        masked_rgbs: List of masked RGB images from camera views
+        cams: Camera state object with view and grid information
+        phi_grid: PhiGrid object (DenseGrid, SparseAdaptiveGrid, etc.) with phi tensor
+        args: Configuration arguments
+    """
     ps.set_window_size(1920, 1080*0.75)
 
     ps.init()
@@ -61,7 +72,7 @@ def visualize_with_polyscope(masked_rgbs: list[np.ndarray], cams: CameraState, p
     # Phi Grid Registration
     bound_low = (cams.target_center - cams.grid_radius).detach().cpu().numpy()
     bound_high = (cams.target_center + cams.grid_radius).detach().cpu().numpy()
-    phi_data = phi.detach().cpu().numpy().transpose(2, 1, 0)
+    phi_data = phi_grid.phi.detach().cpu().numpy().transpose(2, 1, 0)
     
     mask = phi_data < args.iso_level
     idx = np.argwhere(mask)

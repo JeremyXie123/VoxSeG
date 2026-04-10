@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 from dataclasses import dataclass
 from sam2.build_sam import build_sam2_video_predictor
+import torch.nn.functional as F
 
 # Import the camera state from your new core module
 from core.camera import CameraState, project_points
@@ -50,13 +51,14 @@ def generate_sam_masks(rendered_images: torch.Tensor, interior_3d: torch.Tensor,
         # Propagate masks across all frames
         print("Propagating masks...")
         total_frames = len(rendered_images)
-        final_masks = [None] * total_frames 
+
+        _, H, W, _ = rendered_images.shape
+        final_masks = torch.zeros((total_frames, H, W), device=device, dtype=torch.bool)
 
         for out_frame_idx, _, out_mask_logits in predictor.propagate_in_video(inference_state):
-            mask = (out_mask_logits[0, 0] > 0.0).cpu().numpy()
-            final_masks[out_frame_idx] = mask
+            final_masks[out_frame_idx] = out_mask_logits[0, 0] > 0.0
 
-        target_masks = np.stack(final_masks)
+        target_masks = final_masks.cpu().numpy()
 
     # Generate blended images (red tint) for Polyscope visualization later
     original_renders = rendered_images.detach().cpu().numpy()

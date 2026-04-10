@@ -7,7 +7,7 @@ from core.splat_io import load_ply, print_gpu_memory
 from core.camera import CameraState, setup_camera_geometry, get_batch_Ks, get_batch_viewmats
 from stages.rendering import render_splat_views
 from stages.segmentation import generate_sam_masks
-from stages.optimize import optimize_voxel_grid, render_phi_to_image
+from stages.optimize import PhiGrid, DenseGrid, SparseAdaptiveGrid, optimize_voxel_grid
 from stages.evaluation import visualize_with_polyscope, plot_training_metrics, visualize_batch_grid
 
 if __name__ == "__main__":
@@ -33,6 +33,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_test_samples", type=int, default=100, help="Number of samples per ray for test view rendering")
     parser.add_argument("--batch_size", type=int, default=4, help="Number of views to sample per optimization step")
     parser.add_argument("--metric", type=str, default="bce", choices=["bce", "mse", "kl"], help="Loss metric for optimization")
+    parser.add_argument("--grid_type", type=str, default="dense", choices=["dense", "adaptive"], help="Type of voxel grid to optimize")
+    parser.add_argument("--use_color", type=bool, default=False, help="Whether to optimize color in addition to occupancy")
     args = parser.parse_args()
 
     input_filename = os.path.splitext(os.path.basename(args.input))[0]
@@ -54,7 +56,8 @@ if __name__ == "__main__":
     rendered_images = render_splat_views(splats, cams, args)
     seg_result = generate_sam_masks(rendered_images, interior_3d, cams, args, device)
     
-    phi_grid, history = optimize_voxel_grid(seg_result, cams, args, device)
+    phi_grid = DenseGrid(args, device) if args.grid_type == "dense" else SparseAdaptiveGrid(args, device, cams)
+    history = optimize_voxel_grid(phi_grid, seg_result, cams, args, device)
 
     # --- 2. EVALUATION & VISUALIZATION ---
     print("Optimization complete. Visualizing training history...")
@@ -68,22 +71,22 @@ if __name__ == "__main__":
     test_viewmats = get_batch_viewmats(splats.means, cams.target_center, cams.cam_radius, args.num_test_views)
     
     # Bundle the new views into our structured CameraState
-    test_cams = CameraState(
-        target_center=cams.target_center,
-        target_radius=cams.target_radius,
-        cam_radius=cams.cam_radius,
-        grid_radius=cams.grid_radius,
-        viewmats=test_viewmats,
-        Ks=test_Ks
-    )
+    # test_cams = CameraState(
+    #     target_center=cams.target_center,
+    #     target_radius=cams.target_radius,
+    #     cam_radius=cams.cam_radius,
+    #     grid_radius=cams.grid_radius,
+    #     viewmats=test_viewmats,
+    #     Ks=test_Ks
+    # )
 
-    test_renders = render_splat_views(splats, test_cams, args, chunk_size=args.num_test_views)
-    phi_renders = render_phi_to_image(phi_grid, test_cams, args, device)
+    # test_renders = render_splat_views(splats, test_cams, args, chunk_size=args.num_test_views)
+    # phi_renders = render_phi_to_image(phi_grid, test_cams, args, device)
 
-    # Concat and visualize
-    original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
-    phi_masks = phi_renders.detach().float().cpu().numpy()
-    phi_masks_rgb = np.repeat(phi_masks[:, :, :, None], 3, axis=-1)
+    # # Concat and visualize
+    # original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
+    # phi_masks = phi_renders.detach().float().cpu().numpy()
+    # phi_masks_rgb = np.repeat(phi_masks[:, :, :, None], 3, axis=-1)
 
-    combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
-    visualize_batch_grid(combined, num_cols=args.num_test_views)
+    # combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
+    # visualize_batch_grid(combined, num_cols=args.num_test_views)

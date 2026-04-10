@@ -1,126 +1,142 @@
 import time
-
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+from abc import ABC, abstractmethod
 
-# Import our custom types and camera math
 from core.camera import CameraState, construct_rays
-from core.splat_io import print_gpu_memory
 from stages.segmentation import SegmentationResult
+from core.splat_io import print_gpu_memory
 
-def init_phi_grid(resolution: int, device: torch.device) -> torch.nn.Parameter:
-    """Initializes a voxel grid of the given resolution as a trainable PyTorch parameter."""
-    phi = torch.nn.Parameter(torch.randn((resolution, resolution, resolution), device=device) * 0.1 + 0.5)
-    return phi
+class PhiGrid(nn.Module, ABC):
+    """Abstract base class where the grid owns its optimization logic."""
+    def __init__(self, args, device):
+        super().__init__()
+        self.args = args
+        self.device = device
+        self.optimizer = None
 
-def sample_points_along_rays(ray_origins: torch.Tensor, ray_dirs: torch.Tensor, num_samples: int) -> torch.Tensor:
-    """Samples points along rays between near and far planes."""
-    t_vals = torch.linspace(0.1, 10.0, num_samples, device=ray_origins.device) 
-    points = ray_origins[:, None, :] + ray_dirs[:, None, :] * t_vals[None, :, None] 
-    return points
+    @abstractmethod
+    def summarize(self):
+        """Prints summary statistics about the current grid state for debugging."""
+        pass
 
-def query_phi_trilinear(phi: torch.Tensor, points: torch.Tensor, grid_center: torch.Tensor, grid_radius: float) -> torch.Tensor:
-    """Queries the voxel grid at 3D points using trilinear interpolation."""
-    center = grid_center.to(points.device)
-    points_norm = (points - center) / grid_radius
-    
-    # grid_sample expects [N, C, D, H, W]
-    grid = phi[None, None, ...] 
-    N_rays, N_samples, _ = points_norm.shape
-    sampling_coords = points_norm.reshape(1, N_rays * N_samples, 1, 1, 3)
-    
-    vals = F.grid_sample(grid, sampling_coords, mode='bilinear', padding_mode='border', align_corners=True)
-    return vals.reshape(N_rays, N_samples)
+    @abstractmethod
+    def step(self, batch_views: list[int], seg_result: SegmentationResult, cams: CameraState) -> dict:
+        """Performs one optimization step, including potential subdivision or refinement."""
+        pass
 
-def dirichlet_energy(phi: torch.Tensor) -> torch.Tensor:
-    """Computes the Dirichlet energy (L2 norm of gradients) as a smoothness prior."""
-    dx = phi[1:, :, :] - phi[:-1, :, :]
-    dy = phi[:, 1:, :] - phi[:, :-1, :]
-    dz = phi[:, :, 1:] - phi[:, :, :-1]
-    
-    return (dx**2).mean() + (dy**2).mean() + (dz**2).mean()
+    @abstractmethod
+    def query(self, points: torch.Tensor, cams: CameraState) -> torch.Tensor:
+        pass
 
-def render_phi_to_image(phi: torch.Tensor, cams: CameraState, args, device: torch.device) -> torch.Tensor:
-    """Renders the phi grid as an image (masks) using volume rendering."""
-    renderings = []
-    for i in range(len(cams.viewmats)):
-        ray_origins, ray_dirs = construct_rays(cams.viewmats[i], cams.Ks[i], args.height, args.width, device)
-        points = sample_points_along_rays(ray_origins, ray_dirs, num_samples=args.num_test_samples) 
-        phi_vals = query_phi_trilinear(phi, points, cams.target_center, cams.grid_radius)
-        alpha = torch.sigmoid(-args.sharpness * phi_vals)
-        mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)
-        renderings.append(mask.reshape(args.height, args.width))
-    return torch.stack(renderings)
+    def render_mask(self, view_idx: int, cams: CameraState, num_samples: int) -> torch.Tensor:
+        """Shared volumetric rendering logic used by all child classes."""
+        ray_origins, ray_dirs = construct_rays(
+            cams.viewmats[view_idx], cams.Ks[view_idx], 
+            self.args.height, self.args.width, self.device
+        )
+        t_vals = torch.linspace(0.1, 10.0, num_samples, device=self.device) 
+        points = ray_origins[:, None, :] + ray_dirs[:, None, :] * t_vals[None, :, None] 
+        
+        phi_vals = self.query(points, cams)
+        alpha = torch.sigmoid(-self.args.sharpness * phi_vals)
+        return 1.0 - torch.prod(1.0 - alpha, dim=-1)
 
-def optimize_voxel_grid(seg_result: SegmentationResult, cams: CameraState, args, device: torch.device) -> torch.Tensor:
-    """
-    The main training loop. Casts rays through the grid, compares the rendered
-    opacities against the SAM 2 masks, and updates the voxel weights.
-    """
-    print("Initializing voxel grid and optimizer...")
-    phi = init_phi_grid(args.grid_resolution, device)
-    optimizer = torch.optim.Adam([phi], lr=args.lr)
+class DenseGrid(PhiGrid):
+    """Standard fixed-resolution grid."""
+    def __init__(self, args, device):
+        super().__init__(args, device)
+        res = args.grid_resolution
+        self.phi = nn.Parameter(torch.randn((res, res, res), device=device) * 0.1 + 0.5)
+        self.optimizer = torch.optim.Adam([self.phi], lr=args.lr)
 
-    print(f"Starting optimization for {args.num_iters} iterations...")
+    def summarize(self):
+        phi_min = self.phi.min().item()
+        phi_max = self.phi.max().item()
+        phi_mean = self.phi.mean().item()
+        phi_median = torch.median(self.phi).item()
+        phi_midrange = (phi_min + phi_max) / 2.0
+        print(f"Phi min/max/avg/med/mid: [{phi_min:.4f}, {phi_max:.4f}, {phi_mean:.4f}, {phi_median:.4f}, {phi_midrange:.4f}]")
 
-    history = {'total_loss': [], 'mask_loss': [], 'smooth_loss': [], 'time': []}
-    
-    start_time = time.time()
-    for iter in range(args.num_iters):
-        total_loss = 0.0
+    def query(self, points, cams):
+        points_norm = (points - cams.target_center) / cams.grid_radius
+        grid = self.phi[None, None, ...] 
+        N_rays, N_samples = points.shape[0], points.shape[1]
+        sampling_coords = points_norm.reshape(1, N_rays * N_samples, 1, 1, 3)
+        vals = F.grid_sample(grid, sampling_coords, mode='bilinear', padding_mode='border', align_corners=True)
+        return vals.reshape(N_rays, N_samples)
+
+    def step(self, batch_indices, seg_result, cams):
+        self.optimizer.zero_grad()
         total_mask_loss = 0.0
+        
+        for idx in batch_indices:
+            pred_mask = self.render_mask(idx, cams, self.args.num_samples)
+            target = torch.from_numpy(seg_result.masks[idx]).float().to(self.device).view(-1)
+            
+            # Loss calculation
+            loss = F.binary_cross_entropy(pred_mask, target) / len(batch_indices)
+            loss.backward()
+            total_mask_loss += loss.item()
 
-        # Stochastic batching
+        # Regularization
+        dx = self.phi[1:, :, :] - self.phi[:-1, :, :]
+        dy = self.phi[:, 1:, :] - self.phi[:, :-1, :]
+        dz = self.phi[:, :, 1:] - self.phi[:, :, :-1]
+        smooth_loss = self.args.beta * ((dx**2).mean() + (dy**2).mean() + (dz**2).mean())
+        smooth_loss.backward()
+
+        self.optimizer.step()
+        return {"mask_loss": total_mask_loss, "smooth_loss": smooth_loss}
+
+class SparseAdaptiveGrid(PhiGrid):
+    """Adaptive grid that handles subdivision logic."""
+    def __init__(self, args, device):
+        super().__init__(args, device)
+        # Initialize fvdb structure here...
+        self.current_iteration = 0
+
+    def query(self, points, cams):
+        # fvdb-specific lookup
+        return torch.zeros((points.shape[0], points.shape[1]), device=self.device)
+
+    def step(self, batch_indices, seg_result, cams):
+        self.current_iteration += 1
+        
+        # 1. Standard Gradient Step (similar to DenseGrid)
+        # ... logic to compute loss and update active voxels ...
+
+        # 2. Subdivision Logic
+        if self.current_iteration % 50 == 0:
+            print("Checking for subdivision triggers...")
+            # self.subdivide_high_gradient_regions()
+            # self.optimizer = update_optimizer_for_new_params()
+
+        return {"mask_loss": 0.0, "smooth_loss": 0.0}
+
+# --- UNIFIED PIPELINE ENTRY ---
+
+def optimize_voxel_grid(grid: PhiGrid, seg_result: SegmentationResult, cams: CameraState, args, device: torch.device):    
+    history = {'total_loss': [], 'mask_loss': [], 'smooth_loss': [], 'time': []}
+    start_time = time.time()
+
+    for iter in range(args.num_iters):
         batch_indices = torch.randperm(args.num_views)[:args.batch_size].tolist()
         
-        for view_idx in batch_indices:
-            # Perform volumetric rendering of the current phi grid to get predicted mask
-            ray_origins, ray_dirs = construct_rays(cams.viewmats[view_idx], cams.Ks[view_idx], args.height, args.width, device)
-            points = sample_points_along_rays(ray_origins, ray_dirs, args.num_samples)
-            phi_vals = query_phi_trilinear(phi, points, cams.target_center, cams.grid_radius)
-            alpha = torch.sigmoid(-args.sharpness * phi_vals)
-            pred_mask = 1.0 - torch.prod(1.0 - alpha, dim=-1)
+        # The grid handles EVERYTHING internally
+        metrics = grid.step(batch_indices, seg_result, cams)
 
-            # Compute BCE loss with SAM mask as target
-            target = torch.from_numpy(seg_result.masks[view_idx]).float().to(device).view(-1)
-            
-            if args.metric == "bce":
-                mask_loss = F.binary_cross_entropy(pred_mask, target)
-            elif args.metric == "mse":
-                mask_loss = F.mse_loss(pred_mask, target)
-            elif args.metric == "kl":
-                eps = 1e-7
-                p = torch.stack([pred_mask, 1 - pred_mask], dim=-1).clamp(eps, 1.0 - eps)
-                q = torch.stack([target, 1 - target], dim=-1).clamp(eps, 1.0 - eps)
-                mask_loss = F.kl_div(p.log(), q, reduction='batchmean')
+        # Logging logic
+        total_loss = metrics['mask_loss'] + metrics['smooth_loss']
+        time_elapsed = time.time() - start_time
 
-            view_loss = mask_loss / args.num_views
-            total_loss += view_loss
-            total_mask_loss += view_loss.item()
+        history['total_loss'].append(total_loss)
+        history['mask_loss'].append(metrics['mask_loss'])
+        history['smooth_loss'].append(metrics['smooth_loss'])
+        history['time'].append(time_elapsed)
 
-        # 4. Apply Regularization
-        smooth_term = args.beta * dirichlet_energy(phi)
-        total_loss += smooth_term
-
-        # 5. Backpropagate & Step
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
-
-        # Compute information about phi
-        phi_min = phi.min().item()
-        phi_max = phi.max().item()
-        phi_mean = phi.mean().item()
-        phi_median = torch.median(phi).item()
-        phi_midrange = (phi_min + phi_max) / 2.0
-        print(f"Iter {iter+1}/{args.num_iters}: Loss={total_loss.item():.4f}, Mask={total_mask_loss:.6f}, Smooth={smooth_term.item():.6f}")
-        print(f"Phi min/max/avg/med/mid: [{phi_min:.4f}, {phi_max:.4f}, {phi_mean:.4f}, {phi_median:.4f}, {phi_midrange:.4f}]")
+        print(f"Iter {iter+1}/{args.num_iters}: Time={time_elapsed:.2f}s, Loss={total_loss:.4f}, Mask={metrics['mask_loss']:.6f}, Smooth={metrics['smooth_loss']:.6f}")        
+        grid.summarize()
         print_gpu_memory()
-        
-        history['total_loss'].append(total_loss.item())
-        history['mask_loss'].append(total_mask_loss)
-        history['smooth_loss'].append(smooth_term.item())
-        history['time'].append(time.time() - start_time)
-
-    print("Optimization complete.")
-    return phi, history
+    return history

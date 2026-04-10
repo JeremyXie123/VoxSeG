@@ -265,8 +265,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Ignore model and splat assets
-polyscope/models/
-polyscope/splats/
 *.obj
 *.ply
 
@@ -280,4 +278,9 @@ imgui.ini
 # Ignore SAM
 *.pt
 *.yaml
-polyscope/rendered/
+graphs/
+splats/
+
+# Ignore CUDA
+*.run
+*.sh
