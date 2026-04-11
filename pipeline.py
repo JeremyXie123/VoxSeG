@@ -37,8 +37,6 @@ if __name__ == "__main__":
     parser.add_argument("--use_color", type=bool, default=False, help="Whether to optimize color in addition to occupancy")
     args = parser.parse_args()
 
-    input_filename = os.path.splitext(os.path.basename(args.input))[0]
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print_gpu_memory()
 
@@ -61,6 +59,7 @@ if __name__ == "__main__":
 
     # --- 2. EVALUATION & VISUALIZATION ---
     print("Optimization complete. Visualizing training history...")
+    input_filename = os.path.splitext(os.path.basename(args.input))[0]
     plot_training_metrics(history, filename=f"graphs/{input_filename}_optimization_log.png")
 
     print("Visualizing vertices in polyscope...")

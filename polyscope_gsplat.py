@@ -91,7 +91,7 @@ def main():
 
     # Register Gaussians
     ps.register_gaussian_particles("gaussians",
-                                   subsample_factor=2, # set to >1 for fast rendering at lower resolution
+                                   subsample_factor=1, # set to >1 for fast rendering at lower resolution
                                    # the arguments below are passed directly
                                    # to gsplat.rasterization(...). See the docs there for the meaning
                                    # and other parameters you can pass.
