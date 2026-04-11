@@ -7,8 +7,11 @@ from core.splat_io import load_ply, print_gpu_memory
 from core.camera import CameraState, setup_camera_geometry, get_batch_Ks, get_batch_viewmats
 from stages.rendering import render_splat_views
 from stages.segmentation import generate_sam_masks
-from stages.optimize import PhiGrid, DenseGrid, optimize_voxel_grid
+from stages.optimize import PhiGrid, DenseGrid, SparseAdaptiveGrid, optimize_voxel_grid
 from stages.evaluation import visualize_with_polyscope, plot_training_metrics, visualize_batch_grid
+
+import pickle
+from PIL import Image
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -35,6 +38,7 @@ if __name__ == "__main__":
     parser.add_argument("--metric", type=str, default="bce", choices=["bce", "mse", "kl"], help="Loss metric for optimization")
     parser.add_argument("--grid_type", type=str, default="dense", choices=["dense", "adaptive"], help="Type of voxel grid to optimize")
     parser.add_argument("--use_color", type=bool, default=False, help="Whether to optimize color in addition to occupancy")
+    parser.add_argument("--cache", action="store_true", help="Cache/Load rendered images and masks")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -51,16 +55,44 @@ if __name__ == "__main__":
     splats = load_ply(args.input, device)
     cams = setup_camera_geometry(interior_3d, splats.means, args, device)
     
-    rendered_images = render_splat_views(splats, cams, args)
-    seg_result = generate_sam_masks(rendered_images, interior_3d, cams, args, device)
+    # Cache management for rendered images and SAM masks
+    input_name = os.path.splitext(os.path.basename(args.input))[0]
+    cache_dir = os.path.join("cameras", input_name)
+    os.makedirs(cache_dir, exist_ok=True)
+    pkl_path = os.path.join(cache_dir, "seg_data.pkl")
+    if args.cache and os.path.exists(pkl_path):
+        print(f"Loading cached data from {cache_dir}...")
+        with open(pkl_path, 'rb') as f:
+            cache_bundle = pickle.load(f)
+            seg_result = cache_bundle['seg_result']
+            rendered_images = torch.from_numpy(cache_bundle['rendered_images']).to(device)
+    else:
+        # Run the expensive stages
+        rendered_images = render_splat_views(splats, cams, args)
+        seg_result = generate_sam_masks(rendered_images, interior_3d, cams, args, device)
+        
+        if args.cache:
+            print(f"Caching images and masks to {cache_dir}...")
+
+            for i in range(len(seg_result.masks)):
+                img_np = (rendered_images[i].detach().cpu().clamp(0, 1).numpy() * 255).astype(np.uint8)
+                Image.fromarray(img_np).save(os.path.join(cache_dir, f"im_{i}_original.png"))
+                mask_np = (seg_result.masks[i] * 255).astype(np.uint8)
+                Image.fromarray(mask_np).save(os.path.join(cache_dir, f"im_{i}_mask.png"))
+
+            cache_bundle = {
+                'seg_result': seg_result,
+                'rendered_images': rendered_images.detach().cpu().numpy()
+            }
+            with open(pkl_path, 'wb') as f:
+                pickle.dump(cache_bundle, f)
     
-    phi_grid = DenseGrid(args, device) # if args.grid_type == "dense" else SparseAdaptiveGrid(args, device, cams)
+    phi_grid = DenseGrid(args, device) if args.grid_type == "dense" else SparseAdaptiveGrid(args, device, cams)
     history = optimize_voxel_grid(phi_grid, seg_result, cams, args, device)
 
     # --- 2. EVALUATION & VISUALIZATION ---
     print("Optimization complete. Visualizing training history...")
-    input_filename = os.path.splitext(os.path.basename(args.input))[0]
-    plot_training_metrics(history, filename=f"graphs/{input_filename}_optimization_log.png")
+    plot_training_metrics(history, filename=f"graphs/{input_name}_optimization_log.png")
 
     print("Visualizing vertices in polyscope...")
     visualize_with_polyscope(seg_result.blended_images, cams, phi_grid, args)
