@@ -61,34 +61,16 @@ def visualize_with_polyscope(masked_rgbs: list[np.ndarray], cams: CameraState, p
     Args:
         masked_rgbs: List of masked RGB images from camera views
         cams: Camera state object with view and grid information
-        phi_grid: PhiGrid object (DenseGrid, SparseAdaptiveGrid, etc.) with phi tensor
+        phi_grid: PhiGrid object (DenseGrid, SparseAdaptiveGrid, etc.) with visualize() method
         args: Configuration arguments
     """
-    ps.set_window_size(1920, 1080*0.75)
+    ps.set_window_size(1920, 1080)
 
     ps.init()
     ps.set_up_dir("neg_y_up")
 
-    # Phi Grid Registration
-    bound_low = (cams.target_center - cams.grid_radius).detach().cpu().numpy()
-    bound_high = (cams.target_center + cams.grid_radius).detach().cpu().numpy()
-    phi_data = phi_grid.phi.detach().cpu().numpy().transpose(2, 1, 0)
-    
-    mask = phi_data < args.iso_level
-    idx = np.argwhere(mask)
-    res = phi_data.shape[0] 
-    points_local = (idx / (res - 1)) * 2 - 1 
-    points_world = cams.target_center.detach().cpu().numpy() + points_local * cams.grid_radius 
-
-    ps_pts = ps.register_point_cloud("Phi Voxel Nodes", points_world, radius=0.0025, color=(1.0, 0.9, 0.1))
-    ps_pts.add_scalar_quantity("phi_val", phi_data[mask], cmap='coolwarm')
-    
-    ps_grid = ps.register_volume_grid("Phi Grid", phi_data.shape, bound_low, bound_high)
-    ps_grid.add_scalar_quantity(
-        "phi", phi_data, defined_on='nodes', cmap='coolwarm', enabled=True,
-        enable_isosurface_viz=True, isosurface_level=args.iso_level, 
-        isosurface_color=(0.2, 0.5, 0.8), enable_gridcube_viz=False
-    )
+    # Delegate grid visualization to the grid's own method
+    phi_grid.visualize(cams)
 
     # Camera Registration
     centers, rights, ups, forwards = [], [], [], []
