@@ -13,53 +13,155 @@ class CameraState:
     viewmats: torch.Tensor
     Ks: torch.Tensor
 
-def get_batch_viewmats(means: torch.Tensor, center: torch.Tensor, distance: float, num_views: int, num_rotations: int = 4, max_pitch: float = np.pi/9) -> torch.Tensor:
-    """Generates a batch of OpenCV LookAt view matrices."""
-    viewmats = []
-    
-    for i in range(num_views):
-        yaw = (2 * np.pi * num_rotations / num_views) * i
-        pitch = (max_pitch / (num_views - 1)) * i 
-        
-        # Remove the negative sign on pitch so cameras climb ABOVE the object
-        x = distance * np.cos(pitch) * np.cos(yaw)
-        y = distance * np.sin(-pitch)
-        z = distance * np.cos(pitch) * np.sin(yaw)
-        
-        cam_pos = center + torch.tensor([x, y, z], dtype=torch.float32, device=means.device)
-        
-        # Standard OpenCV LookAt (Right-handed, Y-Down, Z-Forward)
-        z_axis = (center - cam_pos)
-        z_axis /= torch.norm(z_axis)  # Forward (+Z)
-        
-        up = torch.tensor([0, 1, 0], dtype=torch.float32, device=means.device)
-        
-        # Right (+X) = Cross(World Up, Forward)
-        x_axis = torch.linalg.cross(up, z_axis) 
-        x_axis /= torch.norm(x_axis)
-        
-        # Down (+Y) = Cross(Forward, Right)
-        y_axis = torch.linalg.cross(z_axis, x_axis)
-        y_axis /= torch.norm(y_axis)
-        
-        R = torch.stack([x_axis, y_axis, z_axis], dim=0) 
-        T = -R @ cam_pos
-        
-        mat = torch.eye(4, device=means.device)
-        mat[:3, :3] = R
-        mat[:3, 3] = T
-        viewmats.append(mat)
-        
-    return torch.stack(viewmats)
 
 def get_batch_Ks(focal: float, width: int, height: int, num_views: int, device: torch.device) -> torch.Tensor:
     """Generates a batch of identical camera intrinsics."""
-    Ks = torch.tensor([
-        [focal, 0, width/2],
-        [0, focal, height/2],
+    K = torch.tensor([
+        [focal, 0, width / 2],
+        [0, focal, height / 2],
         [0, 0, 1]
-    ], device=device).repeat(num_views, 1, 1)
-    return Ks
+    ], dtype=torch.float32, device=device)
+    return K.unsqueeze(0).expand(num_views, -1, -1).contiguous()
+
+
+def get_batch_viewmats(
+    center: np.ndarray | torch.Tensor,
+    radius: float,
+    num_rings: int = 1,
+    cameras_per_ring: int = 10,
+    elevation_min: float = 15.0,
+    elevation_max: float = 15.0,
+    up_axis: np.ndarray = None,
+    device: torch.device = None,
+) -> tuple[torch.Tensor, int]:
+    """
+    Generates a batch of view matrices for cameras orbiting around a center point.
+    
+    Cameras are arranged in horizontal rings at different elevations.
+    
+    Args:
+        center: (3,) orbit center point (numpy array or torch tensor)
+        radius: distance from center
+        num_rings: number of elevation rings
+        cameras_per_ring: number of cameras in each ring
+        elevation_min: minimum camera elevation angle in degrees
+        elevation_max: maximum camera elevation angle in degrees  
+        up_axis: (3,) custom up axis for orbit (default: [0, -1, 0] for neg_y_up)
+        device: torch device for output tensors
+    
+    Returns:
+        viewmats: (num_views, 4, 4) world-to-camera transformation matrices
+        cameras_per_ring: number of cameras per ring (for widget sizing)
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Convert center to numpy if needed
+    if torch.is_tensor(center):
+        center = center.detach().cpu().numpy()
+    center = np.asarray(center, dtype=np.float32)
+    
+    # Default up axis (neg_y_up convention)
+    if up_axis is None:
+        up_axis = np.array([0., -1., 0.], dtype=np.float32)
+    up_axis = up_axis / np.linalg.norm(up_axis)
+    
+    # Build a local coordinate frame around the up axis
+    if abs(np.dot(up_axis, np.array([1., 0., 0.]))) < 0.9:
+        right = np.cross(up_axis, np.array([1., 0., 0.]))
+    else:
+        right = np.cross(up_axis, np.array([0., 0., 1.]))
+    right = right / np.linalg.norm(right)
+    forward = np.cross(right, up_axis)
+    forward = forward / np.linalg.norm(forward)
+
+    # Compute elevations for each ring
+    if num_rings == 1:
+        elevations_deg = [(elevation_min + elevation_max) / 2]
+    else:
+        elevations_deg = np.linspace(elevation_min, elevation_max, num_rings)
+    
+    viewmats = []
+    for ring_idx, el_deg in enumerate(elevations_deg):
+        el = np.radians(el_deg)
+        
+        # Azimuths for this ring - offset alternate rings by half spacing for better coverage
+        azimuth_offset = (np.pi / cameras_per_ring) if (ring_idx % 2 == 1) else 0
+        azimuths = np.linspace(0, 2 * np.pi, cameras_per_ring, endpoint=False) + azimuth_offset
+        
+        for az in azimuths:
+            # Camera position in local frame, then transform to world
+            local_offset = (
+                np.cos(el) * np.sin(az) * right -
+                np.cos(el) * np.cos(az) * forward +
+                np.sin(el) * up_axis
+            ) * radius
+            
+            cam_pos = center + local_offset
+
+            # Forward: camera looks toward center
+            z = center - cam_pos
+            z = z / np.linalg.norm(z)
+
+            # Handle gimbal lock when z is nearly parallel to up_axis
+            world_up = up_axis
+            if abs(np.dot(z, world_up)) > 0.99:
+                world_up = forward
+
+            x = np.cross(z, world_up)
+            x = x / np.linalg.norm(x)
+            y = np.cross(z, x)
+
+            # Build world-to-camera matrix
+            R = np.stack([x, y, z], axis=0)  # rows = cam X, Y, Z axes
+            t = -R @ cam_pos
+
+            w2c = np.eye(4, dtype=np.float32)
+            w2c[:3, :3] = R
+            w2c[:3, 3] = t
+            viewmats.append(w2c)
+
+    return torch.tensor(np.stack(viewmats), dtype=torch.float32, device=device), cameras_per_ring
+
+
+def compute_widget_focal_length(radius: float, cameras_per_ring: int, scale: float = 0.3) -> float:
+    """
+    Compute widget focal length to prevent camera overlap in Polyscope.
+    
+    Args:
+        radius: Camera orbit radius
+        cameras_per_ring: Number of cameras in each elevation ring
+        scale: Fraction of max size to use (0.3 = 30% of space between cameras)
+    
+    Returns:
+        Recommended widget focal length
+    """
+    # Arc distance between adjacent cameras in a ring
+    arc_distance = radius * (2 * np.pi / cameras_per_ring)
+    
+    # Widget should be a fraction of half the arc distance
+    return arc_distance * scale * 0.5 * 0.1
+
+
+def compute_orbit_radius(box_size: np.ndarray | list, focal_length: float = 550.0, 
+                         image_size: int = 512, padding: float = 1.0) -> float:
+    """
+    Compute the minimum orbit radius needed to see the entire bounding box.
+    
+    Args:
+        box_size: (3,) array of box dimensions [x, y, z]
+        focal_length: camera focal length in pixels
+        image_size: image height/width in pixels
+        padding: multiplier for extra margin (1.0 = tight fit)
+    
+    Returns:
+        radius: orbit distance from box center
+    """
+    box_size = np.asarray(box_size)
+    diagonal = np.linalg.norm(box_size)
+    min_distance = (diagonal / 2) * focal_length / (image_size / 2)
+    return min_distance * padding
+
 
 def project_points(points_3d: torch.Tensor, viewmat: torch.Tensor, K: torch.Tensor) -> np.ndarray:
     """Projects 3D points to 2D pixel coordinates using camera extrinsics and intrinsics."""
@@ -72,13 +174,16 @@ def project_points(points_3d: torch.Tensor, viewmat: torch.Tensor, K: torch.Tens
     pixel_points = pixel_points[:, :2] / pixel_points[:, 2:3]
     return pixel_points.detach().cpu().float().numpy()
 
-def construct_rays(viewmat: torch.Tensor, K: torch.Tensor, height: int, width: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+
+def construct_rays(viewmat: torch.Tensor, K: torch.Tensor, height: int, width: int, 
+                   device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     """Generates rays (origin and direction) for each pixel in the image."""
-    y, x = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
+    y, x = torch.meshgrid(torch.arange(height, device=device), 
+                          torch.arange(width, device=device), indexing="ij")
     
     # K maps [X_cam, Y_cam, Z_cam] to [u, v, 1], apply inverse to get camera directions from pixels
     inv_K = torch.linalg.inv(K)
-    pixels = torch.stack([x, y, torch.ones_like(x)], dim=-1).float() # [H, W, 3]
+    pixels = torch.stack([x, y, torch.ones_like(x)], dim=-1).float()
     cam_dirs = pixels @ inv_K.T 
 
     # Rotate ray directions based on viewmat rotation
@@ -91,34 +196,3 @@ def construct_rays(viewmat: torch.Tensor, K: torch.Tensor, height: int, width: i
     
     # Return as [N, 3] for use with sampling function
     return ray_origins.reshape(-1, 3), ray_dirs.reshape(-1, 3)
-
-def setup_camera_geometry(interior_3d: torch.Tensor, means: torch.Tensor, args, device: torch.device) -> CameraState:
-    """Wrapper function to derive all target bounds and initialize camera matrices."""
-    # Derive grid properties from known interior points
-    target_points_min = interior_3d.min(dim=0).values
-    target_points_max = interior_3d.max(dim=0).values
-    target_center = (target_points_min + target_points_max) / 2.0
-    target_radius = (target_points_max - target_points_min).max().item() * 1.2 
-
-    cam_radius = target_radius * args.cam_radius_mul
-    grid_radius = target_radius * args.grid_radius_mul
-
-    print(f"Target object information:")
-    print(f"    Center: {target_center.tolist()}")
-    print(f"    Radius: {target_radius:.4f}")
-    print(f"Setting camera radius to {cam_radius:.4f}")
-    print(f"Setting voxel grid radius to {grid_radius:.4f}")
-
-    # Compute matrices
-    Ks = get_batch_Ks(args.focal, args.width, args.height, args.num_views, device)
-    viewmats = get_batch_viewmats(means, target_center, cam_radius, args.num_views)
-
-    # Return everything neatly bundled
-    return CameraState(
-        target_center=target_center,
-        target_radius=target_radius,
-        cam_radius=cam_radius,
-        grid_radius=grid_radius,
-        viewmats=viewmats,
-        Ks=Ks
-    )

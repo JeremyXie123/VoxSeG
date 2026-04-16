@@ -1,15 +1,12 @@
 import os
 import gc
-import tempfile
 import torch
 import numpy as np
 from PIL import Image
 from dataclasses import dataclass
-from sam2.build_sam import build_sam2_video_predictor
-import torch.nn.functional as F
 
-# Import the camera state from your new core module
 from core.camera import CameraState, project_points
+
 
 @dataclass
 class SegmentationResult:
@@ -17,66 +14,162 @@ class SegmentationResult:
     masks: np.ndarray
     blended_images: list[np.ndarray]
 
-def generate_sam_masks(rendered_images: torch.Tensor, interior_3d: torch.Tensor, cams: CameraState, args, device: torch.device) -> SegmentationResult:
+
+def project_points_to_image(points_3d: np.ndarray, viewmat: torch.Tensor, K: torch.Tensor, W: int, H: int):
     """
-    Runs SAM 2.1 Video Predictor by pointing it to a high-speed temp directory,
-    then computes blended visualizations.
+    Project (N,3) world-space points into pixel coords for one camera.
+    Returns (coords (M,2) int [u,v], valid_mask (N,) bool).
     """
-    print("Initializing SAM 2.1 Video Predictor...")
-    # Note: We pass args.sam_config directly so Hydra can resolve its internal pkg:// path
-    predictor = build_sam2_video_predictor(args.sam_config, args.sam_checkpoint, device=device)
+    if len(points_3d) == 0:
+        return np.zeros((0, 2), dtype=int), np.zeros(0, dtype=bool)
+
+    pts_h = np.concatenate([points_3d, np.ones((len(points_3d), 1))], axis=1).T
+    vm = viewmat.cpu().numpy()
+    K_np = K.cpu().numpy()
+
+    cam = vm @ pts_h
+    z = cam[2]
+    valid = z > 0.01
+
+    cam_xy = cam[:2, valid] / z[valid]
+    pix_h = K_np @ np.vstack([cam_xy, np.ones((1, valid.sum()))])
+    u = pix_h[0].astype(int)
+    v = pix_h[1].astype(int)
+
+    in_frame = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    coords = np.stack([u, v], axis=1)[in_frame]
+
+    final_valid = np.zeros(len(points_3d), dtype=bool)
+    final_valid[np.where(valid)[0][in_frame]] = True
+
+    return coords, final_valid
+
+
+def generate_sam_masks(
+    rendered_images: torch.Tensor,
+    prompt_points_3d: torch.Tensor,
+    cams: CameraState,
+    args,
+    device: torch.device,
+    label: str = "object"
+) -> SegmentationResult:
+    """
+    Run SAM3 image segmentation on each rendered view independently.
     
-    # SAM's video model requires a directory of images as input.
-    with tempfile.TemporaryDirectory() as temp_dir:
-        print(f"Extracting {len(rendered_images)} frames...")
-        
-        for i in range(len(rendered_images)):
-            img_np = (rendered_images[i].detach().clamp(0, 1) * 255).byte().cpu().numpy()
-            img_pil = Image.fromarray(img_np)
-            img_pil.save(os.path.join(temp_dir, f"{i:05d}.jpg"), quality=85)
-
-        # Initialize the video inference state
-        print("Initializing SAM state from folder...")
-        inference_state = predictor.init_state(video_path=temp_dir)
-        
-        # Add interior points as an initial prompt to Frame 0
-        input_points = project_points(interior_3d, cams.viewmats[0], cams.Ks[0])
-        input_labels = np.ones(len(input_points), dtype=np.int32)
-        
-        _, _, _ = predictor.add_new_points_or_box(
-            inference_state=inference_state, frame_idx=0, obj_id=1,
-            points=input_points, labels=input_labels
-        )
-
-        # Propagate masks across all frames
-        print("Propagating masks...")
-        total_frames = len(rendered_images)
-
-        _, H, W, _ = rendered_images.shape
-        final_masks = torch.zeros((total_frames, H, W), device=device, dtype=torch.bool)
-
-        for out_frame_idx, _, out_mask_logits in predictor.propagate_in_video(inference_state):
-            final_masks[out_frame_idx] = out_mask_logits[0, 0] > 0.0
-
-        target_masks = final_masks.cpu().numpy()
-
-    # Generate blended images (red tint) for Polyscope visualization later
+    Uses text prompt + projected 3D points to select the best mask per view.
+    This avoids SAM2's video propagation which can lose track across views.
+    
+    Args:
+        rendered_images: (N, H, W, 3) tensor of rendered views
+        prompt_points_3d: (M, 3) tensor of 3D points inside the target object
+        cams: Camera state with viewmats and Ks
+        args: Config with num_views, width, height
+        device: Torch device
+        label: Text label for SAM3 text prompt (e.g., "truck", "car")
+    
+    Returns:
+        SegmentationResult with masks and blended visualization images
+    """
+    from sam3.model_builder import build_sam3_image_model
+    from sam3.model.sam3_image_processor import Sam3Processor
+    
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    num_views = len(rendered_images)
+    H, W = args.height, args.width
+    
+    # Convert prompt points to numpy
+    prompt_pts_np = prompt_points_3d.detach().cpu().numpy()
+    
+    print(f"[SAM3] Loading model...")
+    model = build_sam3_image_model(device="cuda")
+    processor = Sam3Processor(model)
+    
+    masks_list = []
+    
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        for view_idx in range(num_views):
+            print(f"[SAM3] View {view_idx + 1}/{num_views}...")
+            
+            # Get image as numpy/PIL
+            img_np = (rendered_images[view_idx].detach().clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+            pil_img = Image.fromarray(img_np)
+            
+            # Project 3D prompt points to this view
+            vm = cams.viewmats[view_idx]
+            K = cams.Ks[view_idx]
+            add_coords, _ = project_points_to_image(prompt_pts_np, vm, K, W, H)
+            
+            # Run SAM3 text prompt
+            state = processor.set_image(pil_img)
+            
+            if label.strip():
+                output = processor.set_text_prompt(state=state, prompt=label)
+                masks = output["masks"]    # (K, 1, H, W)
+                scores = output["scores"]  # (K,)
+                
+                if scores.numel() == 0:
+                    print(f"  [warn] no detections for '{label}' in view {view_idx}")
+                    # Use empty mask for this view
+                    masks_list.append(np.zeros((H, W), dtype=bool))
+                    continue
+                
+                n_detections = masks.shape[0]
+                print(f"  [info] detected {n_detections} '{label}' instances")
+                
+                # Select mask containing the most projected prompt points
+                best = int(scores.argmax())  # default: highest score
+                
+                if len(add_coords) > 0:
+                    masks_np = masks[:, 0].cpu().numpy()  # (K, H, W)
+                    best_count = 0
+                    best_score = -1
+                    
+                    for k in range(masks_np.shape[0]):
+                        # Count how many prompt points fall inside this mask
+                        points_inside = 0
+                        for (u, v) in add_coords:
+                            if 0 <= v < H and 0 <= u < W and masks_np[k, v, u]:
+                                points_inside += 1
+                        
+                        # Prefer mask with more points; break ties by score
+                        if points_inside > best_count or (points_inside == best_count and scores[k].item() > best_score):
+                            best_count = points_inside
+                            best_score = scores[k].item()
+                            best = k
+                    
+                    if best_count > 0:
+                        print(f"  [info] selected mask {best} (contains {best_count}/{len(add_coords)} pts)")
+                    else:
+                        print(f"  [warn] no mask contains projected points — using highest score (mask {best})")
+                
+                mask = masks[best, 0].cpu().numpy().astype(bool)
+            else:
+                # No label - use full image as mask
+                mask = np.ones((H, W), dtype=bool)
+            
+            masks_list.append(mask)
+    
+    # Convert to numpy array
+    target_masks = np.stack(masks_list, axis=0)
+    
+    # Generate blended images (green tint) for visualization
     original_renders = rendered_images.detach().cpu().numpy()
     blended_images = []
     
-    for i in range(args.num_views):
+    for i in range(num_views):
         tinted = np.zeros((*original_renders.shape[1:3], 3), dtype=np.float32)
-        tinted[..., 0] = 1.0 
+        tinted[..., 1] = 1.0  # Green tint
         alpha_map = (target_masks[i] * 0.5)[..., None].astype(np.float32)
         blended = original_renders[i] * (1.0 - alpha_map) + tinted * alpha_map
         blended_images.append(blended)
-
-    # Aggressively clean up the rasterized images to free VRAM for the optimization stage
-    print("Cleaning up rasterized memory...")
-    del rendered_images
+    
+    # Cleanup
+    del model, processor
     gc.collect()
     torch.cuda.empty_cache()
-
+    
     return SegmentationResult(
         masks=target_masks,
         blended_images=blended_images
