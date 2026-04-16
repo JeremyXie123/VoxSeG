@@ -160,6 +160,26 @@ class PromptBoxUI:
         
         return center, size, angles_deg
     
+    def get_rotation(self) -> np.ndarray:
+        """
+        Extract the rotation matrix from the box transform.
+        
+        Returns:
+            R: (3, 3) rotation matrix (orthonormal, scale removed)
+        """
+        transform = self._get_transform()
+        
+        scale_x = np.linalg.norm(transform[:3, 0])
+        scale_y = np.linalg.norm(transform[:3, 1])
+        scale_z = np.linalg.norm(transform[:3, 2])
+        
+        R = transform[:3, :3].copy()
+        R[:, 0] /= scale_x
+        R[:, 1] /= scale_y
+        R[:, 2] /= scale_z
+        
+        return R
+    
     def clear_camera_previews(self):
         """Remove all camera preview objects from Polyscope."""
         for i in range(500):

@@ -47,7 +47,7 @@ if __name__ == "__main__":
     parser.add_argument("--focal_length", type=float, default=550.0, help="Default focal length")
     parser.add_argument("--padding", type=float, default=1.0, help="Default padding factor")
     parser.add_argument("--elevation_min", type=float, default=5.0, help="Min elevation angle")
-    parser.add_argument("--elevation_max", type=float, default=45.0, help="Max elevation angle")
+    parser.add_argument("--elevation_max", type=float, default=15.0, help="Max elevation angle")
     parser.add_argument("--resolution", type=int, default=512, help="Render resolution")
     
     # Optimization
@@ -59,7 +59,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta", type=float, default=1.0, help="Smoothness weight")
     parser.add_argument("--iso_level", type=float, default=0.5, help="Isosurface level")
     parser.add_argument("--batch_size", type=int, default=32, help="Views per optimization step")
-    parser.add_argument("--metric", type=str, default="bce", choices=["bce", "mse", "kl"])
+    parser.add_argument("--metric", type=str, default="bce", choices=["bce", "mse", "kl", "mi"])
     
     # Evaluation
     parser.add_argument("--num_test_views", type=int, default=7, help="Unseen views for evaluation")
@@ -113,8 +113,10 @@ if __name__ == "__main__":
     box_ui.print_properties()
     
     center, size, _ = box_ui.get_properties()
+    grid_rotation = torch.tensor(box_ui.get_rotation(), dtype=torch.float32, device=device)
     
     # Compute radii from box size
+    # Grid radius = half the longest axis (used for normalizing coordinates to [-1, 1])
     grid_radius = float(np.max(size) / 2.0)
     cam_radius = compute_orbit_radius(size, focal_length=box_ui.focal_length, image_size=args.resolution, padding=box_ui.padding)
     
@@ -153,6 +155,7 @@ if __name__ == "__main__":
         target_radius=float(np.max(size)),
         cam_radius=cam_radius,
         grid_radius=grid_radius,
+        grid_rotation=grid_rotation,
         viewmats=viewmats,
         Ks=Ks
     )
@@ -179,6 +182,7 @@ if __name__ == "__main__":
         target_radius=cams.target_radius,
         cam_radius=cams.cam_radius,
         grid_radius=cams.grid_radius,
+        grid_rotation=cams.grid_rotation,
         viewmats=cams.viewmats[valid_idx],
         Ks=cams.Ks[valid_idx]
     )
@@ -219,6 +223,7 @@ if __name__ == "__main__":
         target_radius=cams.target_radius,
         cam_radius=cams.cam_radius,
         grid_radius=cams.grid_radius,
+        grid_rotation=cams.grid_rotation,
         viewmats=test_viewmats,
         Ks=test_Ks
     )

@@ -61,6 +61,63 @@ class PhiGrid(nn.Module, ABC):
             p = torch.stack([pred_mask, 1 - pred_mask], dim=-1).clamp(eps, 1 - eps)
             q = torch.stack([target,    1 - target   ], dim=-1).clamp(eps, 1 - eps)
             return F.kl_div(p.log(), q, reduction='batchmean')
+        elif self.args.metric == "mi":
+            return self._mutual_information_loss(pred_mask, target)
+    
+    def _mutual_information_loss(self, pred: torch.Tensor, target: torch.Tensor, 
+                                  num_bins: int = 32) -> torch.Tensor:
+        """
+        Compute negative mutual information as a loss (minimize to maximize MI).
+        
+        Uses soft histogram binning for differentiability.
+        MI(P, T) = H(P) + H(T) - H(P, T)
+        
+        Args:
+            pred: Predicted mask values in [0, 1], shape (N,)
+            target: Target mask values in [0, 1], shape (N,)
+            num_bins: Number of histogram bins
+        
+        Returns:
+            Negative mutual information (lower = better alignment)
+        """
+        eps = 1e-7
+        n = pred.shape[0]
+        
+        # Bin centers from 0 to 1
+        bin_centers = torch.linspace(0, 1, num_bins, device=pred.device)
+        
+        # Soft binning using Gaussian kernel
+        # sigma controls bin width - smaller = sharper bins
+        sigma = 1.0 / num_bins
+        
+        # Compute soft bin assignments: (N, num_bins)
+        pred_bins = torch.exp(-0.5 * ((pred.unsqueeze(1) - bin_centers) / sigma) ** 2)
+        target_bins = torch.exp(-0.5 * ((target.unsqueeze(1) - bin_centers) / sigma) ** 2)
+        
+        # Normalize to get soft histograms
+        pred_bins = pred_bins / (pred_bins.sum(dim=1, keepdim=True) + eps)
+        target_bins = target_bins / (target_bins.sum(dim=1, keepdim=True) + eps)
+        
+        # Marginal distributions: P(pred_bin), P(target_bin)
+        p_pred = pred_bins.mean(dim=0) + eps      # (num_bins,)
+        p_target = target_bins.mean(dim=0) + eps  # (num_bins,)
+        
+        # Joint distribution: P(pred_bin, target_bin)
+        # Outer product averaged over samples
+        p_joint = torch.einsum('ni,nj->ij', pred_bins, target_bins) / n + eps  # (num_bins, num_bins)
+        
+        # Entropies
+        h_pred = -torch.sum(p_pred * torch.log(p_pred))
+        h_target = -torch.sum(p_target * torch.log(p_target))
+        h_joint = -torch.sum(p_joint * torch.log(p_joint))
+        
+        # Mutual information: I(P; T) = H(P) + H(T) - H(P, T)
+        mi = h_pred + h_target - h_joint
+        
+        # Return negative MI (we want to maximize MI, so minimize -MI)
+        # Normalize by max possible MI for stability
+        max_mi = torch.log(torch.tensor(num_bins, device=pred.device, dtype=pred.dtype))
+        return -mi / max_mi
 
     def render_mask(self, view_idx: int, cams: CameraState, num_samples: int) -> torch.Tensor:
         """Shared volumetric rendering logic used by all child classes."""
@@ -85,8 +142,17 @@ class BasicGrid(PhiGrid):
 
     def query(self, points: torch.Tensor, cams: CameraState) -> torch.Tensor:
         center = cams.target_center.to(points.device)
-        points_norm = (points - center) / cams.grid_radius
-        grid = self.phi[None, None, ...]
+        R = cams.grid_rotation.to(points.device)  # (3, 3) maps local->world
+        
+        # Transform world points to box-local coordinates:
+        # R's columns are the box's local axes in world coords
+        # To go world->local: local = R^T @ (world - center)
+        # For row vectors: local_row = (world_row - center) @ R
+        points_centered = points - center
+        points_local = points_centered @ R
+        points_norm = points_local / cams.grid_radius
+        
+        grid = self.phi[None, None, ...]  # (1, 1, res, res, res)
         N_rays, N_samples, _ = points_norm.shape
         sampling_coords = points_norm.reshape(1, N_rays * N_samples, 1, 1, 3)
         vals = F.grid_sample(grid, sampling_coords, mode='bilinear', padding_mode='border', align_corners=True)
@@ -143,28 +209,26 @@ class BasicGrid(PhiGrid):
 
     def visualize(self, cams: CameraState):
         """Register the dense phi grid in Polyscope as a volume grid with isosurface."""
-        bound_low = (cams.target_center - cams.grid_radius).detach().cpu().numpy()
-        bound_high = (cams.target_center + cams.grid_radius).detach().cpu().numpy()
+        center = cams.target_center.detach().cpu().numpy()
+        R = cams.grid_rotation.detach().cpu().numpy()  # (3, 3) maps local->world
+        radius = cams.grid_radius
+        
         phi_data = self.phi.detach().cpu().numpy().transpose(2, 1, 0)
 
         # Register voxel nodes near the isosurface as a point cloud
         mask = phi_data < self.args.iso_level
         idx = np.argwhere(mask)
         res = phi_data.shape[0]
+        
+        # Local coordinates in [-1, 1]
         points_local = (idx / (res - 1)) * 2 - 1
-        points_world = cams.target_center.detach().cpu().numpy() + points_local * cams.grid_radius
+        # Scale by radius then rotate local->world: world = local @ R^T + center
+        # Since R maps local->world as R @ local_col, for row vectors: local_row @ R^T
+        points_scaled = points_local * radius
+        points_world = center + points_scaled @ R.T
 
         ps_pts = ps.register_point_cloud("Phi Voxel Nodes", points_world, radius=0.0025, color=(1.0, 0.9, 0.1))
         ps_pts.add_scalar_quantity("phi_val", phi_data[mask], cmap='coolwarm')
-
-        # Register the full volume grid with isosurface visualization
-        ps_grid = ps.register_volume_grid("Phi Grid", phi_data.shape, bound_low, bound_high)
-        ps_grid.add_scalar_quantity(
-            "phi", phi_data, defined_on='nodes', cmap='coolwarm', enabled=True,
-            enable_isosurface_viz=True, isosurface_level=self.args.iso_level,
-            isosurface_color=(0.2, 0.5, 0.8), enable_gridcube_viz=False
-        )
-
 
 
 # --------------------------------------------------------------------------- #

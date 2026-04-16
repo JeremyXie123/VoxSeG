@@ -10,6 +10,7 @@ class CameraState:
     target_radius: float
     cam_radius: float
     grid_radius: float
+    grid_rotation: torch.Tensor  # (3, 3) rotation matrix for oriented bounding box
     viewmats: torch.Tensor
     Ks: torch.Tensor
 
@@ -140,7 +141,7 @@ def compute_widget_focal_length(radius: float, cameras_per_ring: int, scale: flo
     arc_distance = radius * (2 * np.pi / cameras_per_ring)
     
     # Widget should be a fraction of half the arc distance
-    return arc_distance * scale * 0.5 * 0.1
+    return arc_distance * scale * 0.5
 
 
 def compute_orbit_radius(box_size: np.ndarray | list, focal_length: float = 550.0, 
