@@ -3,23 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 
 import numpy as np
 import polyscope as ps
 from core.camera import CameraState, construct_rays
 from stages.segmentation import SegmentationResult
 from core.splat_io import print_gpu_memory
-
-
-@dataclass
-class PolyscopeData:
-    """Grid data in a form ready for Polyscope registration."""
-    all_points: np.ndarray       # [N, 3] world-space voxel centres
-    all_phi: np.ndarray          # [N]    phi value at each voxel
-    all_voxel_sizes: np.ndarray  # [N, 3] world-space size of each voxel
-    surface_points: np.ndarray   # [M, 3] subset near the iso-surface
-    surface_phi: np.ndarray      # [M]    phi values for surface voxels
 
 
 class PhiGrid(nn.Module, ABC):
@@ -40,10 +29,6 @@ class PhiGrid(nn.Module, ABC):
 
     @abstractmethod
     def query(self, points: torch.Tensor, cams: CameraState) -> torch.Tensor:
-        pass
-
-    @abstractmethod
-    def get_polyscope_data(self) -> PolyscopeData:
         pass
 
     @abstractmethod
@@ -190,25 +175,10 @@ class BasicGrid(PhiGrid):
         phi_midrange = (phi_min + phi_max) / 2.0
         print(f"Phi min/max/avg/med/mid: [{phi_min:.4f}, {phi_max:.4f}, {phi_mean:.4f}, {phi_median:.4f}, {phi_midrange:.4f}]")
 
-    def get_polyscope_data(self) -> PolyscopeData:
-        phi_np = self.phi.detach().cpu().numpy()
-        res = phi_np.shape[0]
-        idx = np.argwhere(np.ones_like(phi_np, dtype=bool))
-        points_local = (idx / (res - 1)) * 2 - 1
-        all_phi = phi_np.ravel()
-        surface_mask = np.abs(all_phi - self.args.iso_level) < 0.5
-        cell_size = 2.0 / (res - 1)  # local-space voxel size
-        all_voxel_sizes = np.full_like(points_local, cell_size)
-        return PolyscopeData(
-            all_points=points_local.astype(np.float32),
-            all_phi=all_phi.astype(np.float32),
-            all_voxel_sizes=all_voxel_sizes.astype(np.float32),
-            surface_points=points_local[surface_mask].astype(np.float32),
-            surface_phi=all_phi[surface_mask].astype(np.float32),
-        )
-
     def visualize(self, cams: CameraState):
         """Register the dense phi grid in Polyscope as a volume grid with isosurface."""
+        from skimage.measure import marching_cubes
+        
         center = cams.target_center.detach().cpu().numpy()
         R = cams.grid_rotation.detach().cpu().numpy()  # (3, 3) maps local->world
         radius = cams.grid_radius
@@ -229,6 +199,28 @@ class BasicGrid(PhiGrid):
 
         ps_pts = ps.register_point_cloud("Phi Voxel Nodes", points_world, radius=0.0025, color=(1.0, 0.9, 0.1))
         ps_pts.add_scalar_quantity("phi_val", phi_data[mask], cmap='coolwarm')
+        
+        # Extract mesh using marching cubes
+        try:
+            verts, faces, normals, _ = marching_cubes(phi_data, level=self.args.iso_level)
+            
+            # Convert vertices from grid indices to [-1, 1] local coordinates
+            verts_local = (verts / (res - 1)) * 2 - 1
+            
+            # Scale by radius and rotate to world
+            verts_scaled = verts_local * radius
+            verts_world = center + verts_scaled @ R.T
+            
+            # Rotate normals to world space (normals only need rotation, not translation)
+            normals_world = normals @ R.T
+            
+            ps_mesh = ps.register_surface_mesh("Phi Mesh", verts_world, faces)
+            ps_mesh.set_smooth_shade(True)
+            ps_mesh.set_color((0.3, 0.7, 0.9))
+            
+            print(f"[Mesh] Extracted {len(verts_world)} vertices, {len(faces)} faces")
+        except Exception as e:
+            print(f"[Mesh] Could not extract isosurface: {e}")
 
 
 # --------------------------------------------------------------------------- #
