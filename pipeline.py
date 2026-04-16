@@ -172,6 +172,19 @@ if __name__ == "__main__":
     print(f"[SAM] Generating masks with label '{box_ui.label}'...")
     seg_result = generate_sam_masks(rendered_images, box_center_3d, cams, args, device, label=box_ui.label)
     
+    # Filter cameras to only valid views (where mask contains center point)
+    valid_idx = seg_result.valid_indices
+    cams = CameraState(
+        target_center=cams.target_center,
+        target_radius=cams.target_radius,
+        cam_radius=cams.cam_radius,
+        grid_radius=cams.grid_radius,
+        viewmats=cams.viewmats[valid_idx],
+        Ks=cams.Ks[valid_idx]
+    )
+    args.num_views = len(valid_idx)
+    print(f"[Filter] Using {args.num_views} valid views for optimization")
+    
     # -------------------------------------------------------------------------
     # Phase 4: Optimize voxel grid
     # -------------------------------------------------------------------------

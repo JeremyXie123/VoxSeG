@@ -11,8 +11,9 @@ from core.camera import CameraState, project_points
 @dataclass
 class SegmentationResult:
     """Container for the output masks and visualization renders."""
-    masks: np.ndarray
-    blended_images: list[np.ndarray]
+    masks: np.ndarray              # (N_valid, H, W) bool
+    blended_images: list[np.ndarray]  # N_valid RGB images
+    valid_indices: np.ndarray      # (N_valid,) indices into original views
 
 
 def project_points_to_image(points_3d: np.ndarray, viewmat: torch.Tensor, K: torch.Tensor, W: int, H: int):
@@ -57,7 +58,7 @@ def generate_sam_masks(
     Run SAM3 image segmentation on each rendered view independently.
     
     Uses text prompt + projected 3D points to select the best mask per view.
-    This avoids SAM2's video propagation which can lose track across views.
+    Rejects views where the mask is empty or doesn't contain the center point.
     
     Args:
         rendered_images: (N, H, W, 3) tensor of rendered views
@@ -68,7 +69,7 @@ def generate_sam_masks(
         label: Text label for SAM3 text prompt (e.g., "truck", "car")
     
     Returns:
-        SegmentationResult with masks and blended visualization images
+        SegmentationResult with masks, blended images, and valid view indices
     """
     from sam3.model_builder import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor
@@ -87,10 +88,11 @@ def generate_sam_masks(
     processor = Sam3Processor(model)
     
     masks_list = []
+    valid_indices = []
     
     with torch.autocast("cuda", dtype=torch.bfloat16):
         for view_idx in range(num_views):
-            print(f"[SAM3] View {view_idx + 1}/{num_views}...")
+            print(f"[SAM3] View {view_idx + 1}/{num_views}...", end=" ")
             
             # Get image as numpy/PIL
             img_np = (rendered_images[view_idx].detach().clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
@@ -104,65 +106,82 @@ def generate_sam_masks(
             # Run SAM3 text prompt
             state = processor.set_image(pil_img)
             
-            if label.strip():
-                output = processor.set_text_prompt(state=state, prompt=label)
-                masks = output["masks"]    # (K, 1, H, W)
-                scores = output["scores"]  # (K,)
-                
-                if scores.numel() == 0:
-                    print(f"  [warn] no detections for '{label}' in view {view_idx}")
-                    # Use empty mask for this view
-                    masks_list.append(np.zeros((H, W), dtype=bool))
-                    continue
-                
-                n_detections = masks.shape[0]
-                print(f"  [info] detected {n_detections} '{label}' instances")
-                
-                # Select mask containing the most projected prompt points
-                best = int(scores.argmax())  # default: highest score
-                
-                if len(add_coords) > 0:
-                    masks_np = masks[:, 0].cpu().numpy()  # (K, H, W)
-                    best_count = 0
-                    best_score = -1
-                    
-                    for k in range(masks_np.shape[0]):
-                        # Count how many prompt points fall inside this mask
-                        points_inside = 0
-                        for (u, v) in add_coords:
-                            if 0 <= v < H and 0 <= u < W and masks_np[k, v, u]:
-                                points_inside += 1
-                        
-                        # Prefer mask with more points; break ties by score
-                        if points_inside > best_count or (points_inside == best_count and scores[k].item() > best_score):
-                            best_count = points_inside
-                            best_score = scores[k].item()
-                            best = k
-                    
-                    if best_count > 0:
-                        print(f"  [info] selected mask {best} (contains {best_count}/{len(add_coords)} pts)")
-                    else:
-                        print(f"  [warn] no mask contains projected points — using highest score (mask {best})")
-                
-                mask = masks[best, 0].cpu().numpy().astype(bool)
-            else:
-                # No label - use full image as mask
+            if not label.strip():
+                # No label - use full image as mask (all views valid)
                 mask = np.ones((H, W), dtype=bool)
+                masks_list.append(mask)
+                valid_indices.append(view_idx)
+                print("full mask (no label)")
+                continue
+            
+            output = processor.set_text_prompt(state=state, prompt=label)
+            masks = output["masks"]    # (K, 1, H, W)
+            scores = output["scores"]  # (K,)
+            
+            # Check if any detections
+            if scores.numel() == 0:
+                print(f"REJECTED - no '{label}' detected")
+                continue
+            
+            n_detections = masks.shape[0]
+            masks_np = masks[:, 0].cpu().numpy()  # (K, H, W)
+            
+            # Find mask containing the most projected prompt points
+            best_mask_idx = None
+            best_count = 0
+            best_score = -1
+            
+            if len(add_coords) > 0:
+                for k in range(masks_np.shape[0]):
+                    # Count how many prompt points fall inside this mask
+                    points_inside = 0
+                    for (u, v) in add_coords:
+                        if 0 <= v < H and 0 <= u < W and masks_np[k, v, u]:
+                            points_inside += 1
+                    
+                    # Prefer mask with more points; break ties by score
+                    if points_inside > best_count or (points_inside == best_count and scores[k].item() > best_score):
+                        best_count = points_inside
+                        best_score = scores[k].item()
+                        best_mask_idx = k
+            
+            # Reject if no mask contains the center point
+            if best_count == 0:
+                print(f"REJECTED - {n_detections} detections but none contain center point")
+                continue
+            
+            mask = masks_np[best_mask_idx].astype(bool)
+            
+            # Reject empty masks (shouldn't happen if best_count > 0, but safety check)
+            if not mask.any():
+                print(f"REJECTED - empty mask")
+                continue
             
             masks_list.append(mask)
+            valid_indices.append(view_idx)
+            print(f"OK - mask {best_mask_idx} ({best_count} pts, score {best_score:.3f})")
+    
+    valid_indices = np.array(valid_indices, dtype=np.int64)
+    num_valid = len(valid_indices)
+    num_rejected = num_views - num_valid
+    
+    print(f"\n[SAM3] {num_valid}/{num_views} views accepted, {num_rejected} rejected")
+    
+    if num_valid == 0:
+        raise RuntimeError("All views were rejected! Check that the label matches the object and the box is properly positioned.")
     
     # Convert to numpy array
     target_masks = np.stack(masks_list, axis=0)
     
-    # Generate blended images (green tint) for visualization
+    # Generate blended images (green tint) for visualization - only for valid views
     original_renders = rendered_images.detach().cpu().numpy()
     blended_images = []
     
-    for i in range(num_views):
-        tinted = np.zeros((*original_renders.shape[1:3], 3), dtype=np.float32)
+    for i, view_idx in enumerate(valid_indices):
+        tinted = np.zeros((H, W, 3), dtype=np.float32)
         tinted[..., 1] = 1.0  # Green tint
         alpha_map = (target_masks[i] * 0.5)[..., None].astype(np.float32)
-        blended = original_renders[i] * (1.0 - alpha_map) + tinted * alpha_map
+        blended = original_renders[view_idx] * (1.0 - alpha_map) + tinted * alpha_map
         blended_images.append(blended)
     
     # Cleanup
@@ -172,5 +191,6 @@ def generate_sam_masks(
     
     return SegmentationResult(
         masks=target_masks,
-        blended_images=blended_images
+        blended_images=blended_images,
+        valid_indices=valid_indices
     )
