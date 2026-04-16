@@ -13,6 +13,7 @@ The pipeline opens a Polyscope window where you can:
 
 import argparse
 import os
+import shutil
 import torch
 import numpy as np
 import polyscope as ps
@@ -24,6 +25,7 @@ from stages.rendering import render_splat_views
 from stages.segmentation import generate_sam_masks
 from stages.optimize import BasicGrid, optimize_voxel_grid
 from stages.evaluation import plot_training_metrics, visualize_batch_grid
+import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------------
 # Main
@@ -60,6 +62,7 @@ if __name__ == "__main__":
     parser.add_argument("--iso_level", type=float, default=0.5, help="Isosurface level")
     parser.add_argument("--batch_size", type=int, default=32, help="Views per optimization step")
     parser.add_argument("--metric", type=str, default="bce", choices=["bce", "mse", "kl", "mi"])
+    parser.add_argument("--show", type=bool, default=True, help="Whether to show plots or just save them")
     
     # Evaluation
     parser.add_argument("--num_test_views", type=int, default=7, help="Unseen views for evaluation")
@@ -148,7 +151,7 @@ if __name__ == "__main__":
     print(f"[Box] Size: {size}")
     print(f"[Box] Grid radius: {grid_radius:.4f}")
     print(f"[Box] Camera radius: {cam_radius:.4f}")
-    print(f"[Box] Num views: {num_views} ({int(box_ui.num_rings)} rings × {cameras_per_ring}/ring)")
+    print(f"[Box] Num views: {num_views} ({int(box_ui.num_rings)} rings x {cameras_per_ring}/ring)")
     
     cams = CameraState(
         target_center=target_center,
@@ -165,6 +168,10 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     
     input_name = os.path.splitext(os.path.basename(args.input))[0]
+    log_path = f"logs/{input_name}"
+    if os.path.exists(log_path):
+        shutil.rmtree(log_path)
+    os.makedirs(log_path, exist_ok=True)
     
     # For SAM prompts, use box center projected to each view
     box_center_3d = torch.tensor(box_ui.get_center(), dtype=torch.float32, device=device).unsqueeze(0)
@@ -174,7 +181,7 @@ if __name__ == "__main__":
     
     print(f"[SAM] Generating masks with label '{box_ui.label}'...")
     seg_result = generate_sam_masks(rendered_images, box_center_3d, cams, args, device, label=box_ui.label)
-    
+
     # Filter cameras to only valid views (where mask contains center point)
     valid_idx = seg_result.valid_indices
     cams = CameraState(
@@ -188,6 +195,17 @@ if __name__ == "__main__":
     )
     args.num_views = len(valid_idx)
     print(f"[Filter] Using {args.num_views} valid views for optimization")
+
+    num_viz = min(7, args.num_views)
+    valid_renders = rendered_images[valid_idx]
+    viz_renders = valid_renders[:num_viz].detach().cpu().numpy()
+    viz_masks = seg_result.masks[:num_viz]
+    viz_masks_rgb = np.repeat(viz_masks[:, :, :, None], 3, axis=-1).astype(np.float32)
+    combined_viz = np.concatenate([viz_renders, viz_masks_rgb], axis=0)
+    visualize_batch_grid(combined_viz, num_cols=num_viz, filename=f"{log_path}/inputs_and_masks.png", show=args.show)
+
+    box_ui.clear_camera_previews()
+    ps.get_curve_network(box_ui.BOX_NAME).set_enabled(False)
     
     # -------------------------------------------------------------------------
     # Phase 4: Optimize voxel grid
@@ -195,15 +213,15 @@ if __name__ == "__main__":
     
     print(f"\n[Optimize] Grid resolution: {args.grid_resolution}³")
     phi_grid = BasicGrid(args, device)
-    history = optimize_voxel_grid(phi_grid, seg_result, cams, args, device)
+    os.makedirs(f"{log_path}/optimization", exist_ok=True)
+    history = optimize_voxel_grid(phi_grid, seg_result, cams, args, device, f"{log_path}/optimization")
     
     # -------------------------------------------------------------------------
     # Phase 5: Visualization and evaluation
     # -------------------------------------------------------------------------
     
     print("\n[Eval] Saving optimization metrics...")
-    os.makedirs("graphs", exist_ok=True)
-    plot_training_metrics(history, filename=f"graphs/{input_name}_optimization.png")
+    plot_training_metrics(history, filename=f"{log_path}/loss_graph.png", show=args.show)
     
     print("[Eval] Generating test views...")
     test_viewmats, _ = get_batch_viewmats(
@@ -230,8 +248,7 @@ if __name__ == "__main__":
     
     test_renders = render_splat_views(splats, test_cams, args, chunk_size=args.num_test_views)
     
-    phi_masks = torch.stack([phi_grid.render_mask(i, test_cams, args.num_test_samples) 
-                             for i in range(args.num_test_views)])
+    phi_masks = torch.stack([phi_grid.render_mask(i, test_cams, args.num_test_samples) for i in range(args.num_test_views)])
     phi_renders = phi_masks.view(args.num_test_views, args.height, args.width)
     
     original_imgs = test_renders.detach().float().clamp(0, 1).cpu().numpy()
@@ -239,13 +256,14 @@ if __name__ == "__main__":
     phi_masks_rgb = np.repeat(phi_masks_np[:, :, :, None], 3, axis=-1)
     
     combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
-    visualize_batch_grid(combined, num_cols=args.num_test_views)
+
+    os.makedirs(log_path, exist_ok=True)
+    visualize_batch_grid(combined, num_cols=args.num_test_views, filename=f"{log_path}/test_views.png", show=args.show)
     
     print("\n[Polyscope] Final visualization...")
     phi_grid.visualize(cams)
     widget_size = compute_widget_focal_length(cams.cam_radius, args.cameras_per_ring)
-    box_ui.register_cameras(cams.viewmats, cams.Ks, masked_rgbs=seg_result.blended_images,
-                            widget_focal_length=widget_size, color=(0.5, 0.5, 0.5))
+    box_ui.register_cameras(cams.viewmats, cams.Ks, masked_rgbs=seg_result.blended_images, widget_focal_length=widget_size, color=(0.5, 0.5, 0.5))
     ps.show()
     
     print("\n[Done]")

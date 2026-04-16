@@ -227,7 +227,8 @@ class BasicGrid(PhiGrid):
 # UNIFIED PIPELINE ENTRY
 # --------------------------------------------------------------------------- #
 
-def optimize_voxel_grid(grid: PhiGrid, seg_result: SegmentationResult, cams: CameraState, args, device: torch.device):
+import os
+def optimize_voxel_grid(grid: PhiGrid, seg_result: SegmentationResult, cams: CameraState, args, device: torch.device, path:str):
     history = {'total_loss': [], 'mask_loss': [], 'smooth_loss': [], 'time': []}
     start_time = time.time()
 
@@ -247,5 +248,13 @@ def optimize_voxel_grid(grid: PhiGrid, seg_result: SegmentationResult, cams: Cam
               f"Mask={metrics['mask_loss']:.6f}, Smooth={metrics['smooth_loss']:.6f}")
         grid.summarize()
         print_gpu_memory()
+
+        if (iter + 1) % 10 == 0:
+            grid.visualize(cams)
+
+            screenshot_path = f"{path}/mesh_iter_{iter+1:04d}.png"
+            ps.screenshot(screenshot_path)
+            
+            print(f"[Auto-Screenshot] Saved current mesh view to {screenshot_path}")
 
     return history

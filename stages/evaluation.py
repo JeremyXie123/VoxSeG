@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
 
 
-def visualize_batch_grid(images_input, num_cols=5, axes_pad=0.1):
+def visualize_batch_grid(images_input, num_cols=5, axes_pad=0.1, filename="batch_grid.png", show=True):
     """Renders a batch of images in a Matplotlib ImageGrid."""
     if torch.is_tensor(images_input):
         images = images_input.detach().float().clamp(0, 1).cpu().numpy()
@@ -23,10 +23,14 @@ def visualize_batch_grid(images_input, num_cols=5, axes_pad=0.1):
         ax.axis("off")
         
     plt.tight_layout()
-    plt.show()
+    plt.savefig(filename)
+    if show:
+        plt.show()
+    else:
+        plt.close()
 
 
-def plot_training_metrics(history: dict, filename="training_metrics.png"):
+def plot_training_metrics(history: dict, filename="training_metrics.png", show=True):
     """Graphs the Mask Loss and Smoothness Loss over the iterations."""
     iters = range(len(history['total_loss']))
     fig, ax1 = plt.subplots(figsize=(10, 6))
@@ -51,5 +55,7 @@ def plot_training_metrics(history: dict, filename="training_metrics.png"):
     fig.tight_layout()
     os.makedirs("graphs", exist_ok=True)
     plt.savefig(filename)
-    print(f"Metrics graph saved to {filename}")
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
