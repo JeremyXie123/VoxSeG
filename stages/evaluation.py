@@ -73,18 +73,11 @@ def visualize_with_polyscope(masked_rgbs: list[np.ndarray], cams: CameraState, p
     phi_grid.visualize(cams)
 
     # Camera Registration
-    centers, rights, ups, forwards = [], [], [], []
     for i in range(len(cams.viewmats)):
         c2w = torch.linalg.inv(cams.viewmats[i]).detach().cpu().numpy()
         root = c2w[:3, 3] 
         look_dir = c2w[:3, 2]   
-        up_dir = -c2w[:3, 1]    
-        right_dir = c2w[:3, 0]  
-
-        centers.append(root)
-        rights.append(right_dir)
-        ups.append(up_dir)
-        forwards.append(look_dir)
+        up_dir = -c2w[:3, 1]
         
         focal_px = cams.Ks[i, 0, 0].item()
         fov_y = 2 * math.atan(args.height / (2 * focal_px)) * (180 / np.pi)
@@ -98,10 +91,5 @@ def visualize_with_polyscope(masked_rgbs: list[np.ndarray], cams: CameraState, p
         cam.set_widget_focal_length(0.05)
         cam.set_widget_color((0.5, 0.5, 0.5))
         cam.add_color_image_quantity(f"MaskedView_{i}", masked_rgbs[i], enabled=True, show_in_camera_billboard=True)
-
-    ps_cloud = ps.register_point_cloud("Cam-ctr", np.array(centers), enabled=False)
-    ps_cloud.add_vector_quantity("Cam-forward", np.array(forwards), color=(0.8, 0.2, 0.2))
-    ps_cloud.add_vector_quantity("Cam-right", np.array(rights), color=(0.2, 0.8, 0.2))
-    ps_cloud.add_vector_quantity("Cam-up", np.array(ups), color=(0.2, 0.2, 0.8))
     
     ps.show()
