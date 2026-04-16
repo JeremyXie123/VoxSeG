@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import polyscope as ps
-import fvdb
 from core.camera import CameraState, construct_rays
 from stages.segmentation import SegmentationResult
 from core.splat_io import print_gpu_memory
@@ -165,6 +164,8 @@ class BasicGrid(PhiGrid):
             enable_isosurface_viz=True, isosurface_level=self.args.iso_level,
             isosurface_color=(0.2, 0.5, 0.8), enable_gridcube_viz=False
         )
+
+
 
 # --------------------------------------------------------------------------- #
 # UNIFIED PIPELINE ENTRY

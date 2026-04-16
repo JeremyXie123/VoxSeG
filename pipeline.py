@@ -36,8 +36,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_test_samples", type=int, default=100, help="Number of samples per ray for test view rendering")
     parser.add_argument("--batch_size", type=int, default=4, help="Number of views to sample per optimization step")
     parser.add_argument("--metric", type=str, default="bce", choices=["bce", "mse", "kl"], help="Loss metric for optimization")
+    parser.add_argument("--grid_type", type=str, default="basic", choices=["basic"], help="Type of voxel grid to optimize")
     parser.add_argument("--use_color", type=bool, default=False, help="Whether to optimize color in addition to occupancy")
-    parser.add_argument("--grid_type", type=str, default="basic", choices=["basic", "sparse"], help="Type of voxel grid to optimize")
     parser.add_argument("--cache", action="store_true", help="Cache/Load rendered images and masks")
     args = parser.parse_args()
 
@@ -87,9 +87,7 @@ if __name__ == "__main__":
             with open(pkl_path, 'wb') as f:
                 pickle.dump(cache_bundle, f)
     
-    if args.grid_type == "basic":
-        phi_grid = BasicGrid(args, device)
-
+    phi_grid = BasicGrid(args, device)
     history = optimize_voxel_grid(phi_grid, seg_result, cams, args, device)
 
     # --- 2. EVALUATION & VISUALIZATION ---
