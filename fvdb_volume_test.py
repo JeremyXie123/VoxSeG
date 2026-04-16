@@ -98,7 +98,25 @@ for i in range(grid.grid_count):
     pc.add_color_quantity("splatted_color", c, enabled=True)
     pc.set_enabled(False)
 
-# Stage 3: Randomly sampled points (hidden by default)
+# Stage 3: Per-voxel splatted colors using Polyscope SparseVolumeGrid
+for i in range(grid.grid_count):
+    occupied_cells = to_np(grid.ijk[i].jdata)
+    origin = to_np(grid.origins[i])
+    vs = grid.voxel_sizes[i][0].item() 
+    cell_width = (vs, vs, vs)
+    
+    ps_grid = ps.register_sparse_volume_grid(
+        f"voxel_grid_car{i+1}", 
+        origin, 
+        cell_width, 
+        occupied_cells
+    )
+    
+    c = to_np(vox_colors[i].jdata).clip(0, 1)
+    ps_grid.add_color_quantity("splatted_color", c, defined_on='cells', enabled=True)
+    ps_grid.set_enabled(False)
+
+# Stage 4: Randomly sampled points (hidden by default)
 for i, rpts in enumerate([rpts1, rpts2]):
     sc = to_np(sampled_colors[i].jdata).clip(0, 1)
     mask = sc.sum(axis=1) > 0.01
