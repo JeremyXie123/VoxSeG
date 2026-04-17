@@ -16,9 +16,10 @@ from core.ui import PromptBoxUI
 
 def plot_sweep_comparison(all_histories, input_filename, sweep_arg_name):
     """
-    Generalized plotting function for any parameter sweep.
+    Compact horizontal plotting function to save vertical space.
     """
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True)
+    # Reduced height to 4 inches for a "strip" look
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 4))
     
     sweep_values = list(all_histories.keys())
     colors = plt.cm.viridis(np.linspace(0, 1, len(sweep_values)))
@@ -26,26 +27,32 @@ def plot_sweep_comparison(all_histories, input_filename, sweep_arg_name):
     for i, val in enumerate(sweep_values):
         history = all_histories[val]
         iters = range(len(history['mask_loss']))
-        label_str = f"{sweep_arg_name}={val}"
+        label_str = f"{val}" # Shortened label to save legend width
         
         ax1.plot(iters, history['mask_loss'], color=colors[i], label=label_str, linewidth=2)
-        ax2.plot(iters, history['smooth_loss'], color=colors[i], label=label_str, linestyle='--')
-        ax3.plot(iters, history['time'], color=colors[i], label=label_str, linestyle='-.')
+        ax2.plot(iters, history['smooth_loss'], color=colors[i], linestyle='--')
+        ax3.plot(iters, history['time'], color=colors[i], linestyle='-.')
 
-    ax1.set_ylabel('Mask Loss')
-    ax1.set_title(f'Sweep Comparison: {input_filename} ({sweep_arg_name})')
-    ax1.legend(loc='upper right', ncol=2)
-    ax1.grid(True, alpha=0.3)
+    # Minimalist labels and titles
+    ax1.set_title(f'Mask Loss ({sweep_arg_name})', fontsize=10)
+    ax2.set_title('Smoothness Loss', fontsize=10)
+    ax3.set_title('Cumulative Time (s)', fontsize=10)
 
-    ax2.set_ylabel('Smoothness Loss')
-    ax3.set_ylabel('Cumulative Time (s)')
-    ax3.set_xlabel('Iteration')
-    
-    for ax in [ax2, ax3]: ax.grid(True, alpha=0.3)
+    for ax in [ax1, ax2, ax3]:
+        ax.set_xlabel('Iteration', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='both', which='major', labelsize=8)
 
+    # Single legend on the first plot to save space
+    ax1.legend(loc='upper right', fontsize='x-small', title=sweep_arg_name, title_fontsize='8')
+
+    # Tighten margins: top=0.9 removes space where the title used to be
     plt.tight_layout()
+    plt.subplots_adjust(top=0.9, bottom=0.15) 
+    
     out_path = f"sweep/{sweep_arg_name}/comparison.png"
-    plt.savefig(out_path)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, bbox_inches='tight') # bbox_inches='tight' removes extra white padding
     print(f"Sweep visualization saved to {out_path}")
     plt.show()
 
@@ -55,7 +62,7 @@ if __name__ == "__main__":
     # Input/output and Sweep Config
     parser.add_argument("--input", type=str, default="splats/truck.ply")
     parser.add_argument("--sweep_arg", type=str, default="beta", help="Argument to sweep over")
-    parser.add_argument("--sweep_vals", type=float, nargs="+", default=[0.1, 1.0, 10.0])
+    parser.add_argument("--sweep_vals", type=str, nargs="+", default=[0.1, 1.0, 10.0])
     
     # Box/Camera Params (matching pipeline.py)
     parser.add_argument("--box_center", type=float, nargs=3, required=True)
