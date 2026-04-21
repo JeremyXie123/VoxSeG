@@ -1,5 +1,7 @@
 import os
+import sys
 import gc
+import pathlib
 import torch
 import numpy as np
 from PIL import Image
@@ -83,9 +85,22 @@ def generate_sam_masks(
     # Convert prompt points to numpy
     prompt_pts_np = prompt_points_3d.detach().cpu().numpy()
     
+    # Workaround: compute bpe_path directly to avoid pkg_resources issues
+    # Use the model_builder module's location to find the sam3 assets
+    model_builder = sys.modules.get("sam3.model_builder")
+    if model_builder and hasattr(model_builder, "__file__") and model_builder.__file__:
+        # model_builder is at sam3/model_builder.py, so go up one level
+        sam3_root = pathlib.Path(model_builder.__file__).parent
+        bpe_path = str(sam3_root / "assets" / "bpe_simple_vocab_16e6.txt.gz")
+    else:
+        # Fallback: use known location relative to this file
+        bpe_path = str(pathlib.Path(__file__).parent.parent / "sam3" / "sam3" / "assets" / "bpe_simple_vocab_16e6.txt.gz")
+    
     print(f"[SAM3] Loading model...")
-    model = build_sam3_image_model(device="cuda")
-    processor = Sam3Processor(model)
+    model = build_sam3_image_model(bpe_path=bpe_path, device="cuda")
+    threshold = getattr(args, "sam_threshold", 0.5)
+    processor = Sam3Processor(model, confidence_threshold=threshold)
+    print(f"[SAM3] Confidence threshold: {threshold}")
     
     masks_list = []
     valid_indices = []

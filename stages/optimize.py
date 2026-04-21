@@ -175,52 +175,54 @@ class BasicGrid(PhiGrid):
         phi_midrange = (phi_min + phi_max) / 2.0
         print(f"Phi min/max/avg/med/mid: [{phi_min:.4f}, {phi_max:.4f}, {phi_mean:.4f}, {phi_median:.4f}, {phi_midrange:.4f}]")
 
+    def extract_mesh(self, cams: CameraState):
+        """Run marching cubes on phi and return (verts_world, faces, normals_world).
+
+        Returns None if marching cubes fails (e.g., isosurface doesn't exist).
+        """
+        from skimage.measure import marching_cubes
+
+        center = cams.target_center.detach().cpu().numpy()
+        R = cams.grid_rotation.detach().cpu().numpy()
+        radius = cams.grid_radius
+        phi_data = self.phi.detach().cpu().numpy().transpose(2, 1, 0)
+        res = phi_data.shape[0]
+
+        try:
+            verts, faces, normals, _ = marching_cubes(phi_data, level=self.args.iso_level)
+        except Exception as e:
+            print(f"[Mesh] Could not extract isosurface: {e}")
+            return None
+
+        verts_local = (verts / (res - 1)) * 2 - 1
+        verts_world = center + (verts_local * radius) @ R.T
+        normals_world = normals @ R.T
+        return verts_world, faces, normals_world
+
     def visualize(self, cams: CameraState):
         """Register the dense phi grid in Polyscope as a volume grid with isosurface."""
-        from skimage.measure import marching_cubes
-        
         center = cams.target_center.detach().cpu().numpy()
-        R = cams.grid_rotation.detach().cpu().numpy()  # (3, 3) maps local->world
+        R = cams.grid_rotation.detach().cpu().numpy()
         radius = cams.grid_radius
-        
         phi_data = self.phi.detach().cpu().numpy().transpose(2, 1, 0)
+        res = phi_data.shape[0]
 
         # Register voxel nodes near the isosurface as a point cloud
         mask = phi_data < self.args.iso_level
         idx = np.argwhere(mask)
-        res = phi_data.shape[0]
-        
-        # Local coordinates in [-1, 1]
         points_local = (idx / (res - 1)) * 2 - 1
-        # Scale by radius then rotate local->world: world = local @ R^T + center
-        # Since R maps local->world as R @ local_col, for row vectors: local_row @ R^T
-        points_scaled = points_local * radius
-        points_world = center + points_scaled @ R.T
+        points_world = center + (points_local * radius) @ R.T
 
         ps_pts = ps.register_point_cloud("Phi Voxel Nodes", points_world, radius=0.0025, color=(1.0, 0.9, 0.1))
         ps_pts.add_scalar_quantity("phi_val", phi_data[mask], cmap='coolwarm')
-        
-        # Extract mesh using marching cubes
-        try:
-            verts, faces, normals, _ = marching_cubes(phi_data, level=self.args.iso_level)
-            
-            # Convert vertices from grid indices to [-1, 1] local coordinates
-            verts_local = (verts / (res - 1)) * 2 - 1
-            
-            # Scale by radius and rotate to world
-            verts_scaled = verts_local * radius
-            verts_world = center + verts_scaled @ R.T
-            
-            # Rotate normals to world space (normals only need rotation, not translation)
-            normals_world = normals @ R.T
-            
+
+        mesh = self.extract_mesh(cams)
+        if mesh is not None:
+            verts_world, faces, _ = mesh
             ps_mesh = ps.register_surface_mesh("Phi Mesh", verts_world, faces)
             ps_mesh.set_smooth_shade(True)
             ps_mesh.set_color((0.3, 0.7, 0.9))
-            
             print(f"[Mesh] Extracted {len(verts_world)} vertices, {len(faces)} faces")
-        except Exception as e:
-            print(f"[Mesh] Could not extract isosurface: {e}")
 
 
 # --------------------------------------------------------------------------- #

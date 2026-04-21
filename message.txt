@@ -1,0 +1,86 @@
+# ============================================================
+# Spatial Pipeline — Installation Instructions
+# Tested on Ubuntu 24.04 with NVIDIA GPU
+# ============================================================
+
+# --- 1. System dependencies ---
+sudo apt install cmake python-is-python3 ninja-build build-essential git
+
+# --- 2. CUDA 12.8 toolkit (skip if already installed) ---
+# Check with: nvcc --version
+# If already on 12.8, skip this whole step.
+wget https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_570.86.10_linux.run
+sudo sh cuda_12.8.0_570.86.10_linux.run --toolkit --silent --override
+rm cuda_12.8.0_570.86.10_linux.run
+
+# --- 3. Add CUDA to PATH permanently ---
+echo 'export CUDA_HOME=/usr/local/cuda-12.8' >> ~/.bashrc
+echo 'export PATH=$CUDA_HOME/bin:$PATH' >> ~/.bashrc
+echo 'export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
+
+# --- 4. Create conda env (Python 3.12 is required by SAM3) ---
+conda create -n spatial_pipeline python=3.12 -y
+conda activate spatial_pipeline
+
+# --- 5. PyTorch 2.10.0 with CUDA 12.8 ---
+pip install torch==2.10.0 torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# --- 6. SAM3 from source ---
+# NOTE: You must first request access to the `facebook/sam3` repo on HuggingFace,
+# then run `hf auth login` with your token before the model can download weights.
+git clone https://github.com/facebookresearch/sam3.git
+cd sam3
+pip install -e .
+cd ..
+
+# --- 7. gsplat + its build deps ---
+pip install ninja jaxtyping rich
+pip install gsplat
+
+# --- 8. Polyscope ---
+pip install polyscope
+
+# --- 9. Other pipeline runtime deps ---
+pip install matplotlib plyfile scikit-image
+
+# --- 10. SAM3's undeclared runtime deps ---
+# SAM3 imports these but doesn't declare them in pyproject.toml
+pip install einops pycocotools psutil
+
+# --- 11. HuggingFace CLI for downloading SAM3 weights ---
+pip install huggingface_hub
+hf auth login    # paste your HF token when prompted
+
+# --- 12. Dependency conflict fixes ---
+# SAM3 pins numpy<2, but scikit-image pulled in numpy 2.x and tifffile 2026.x
+# (which itself requires numpy>=2). Pin both down to compatible versions:
+pip install "numpy<2"
+pip install "tifffile<2025"
+
+# SAM3 imports pkg_resources, which was removed in setuptools 81.
+# Pin setuptools to the last version that ships it:
+pip install "setuptools<81"
+
+# --- 13. Verify ---
+pip check   # should print "No broken requirements found."
+
+python -c "
+import torch, torchvision, sam3, polyscope, gsplat, skimage, plyfile
+print('torch:', torch.__version__)
+print('torchvision:', torchvision.__version__)
+print('polyscope:', polyscope.__version__)
+print('gsplat:', gsplat.__version__)
+print('skimage:', skimage.__version__)
+print('CUDA available:', torch.cuda.is_available())
+from sam3.model_builder import build_sam3_image_model
+print('sam3 import OK')
+"
+# Some deprecation warnings (pkg_resources, timm.models.layers) are expected
+# and harmless. If it prints 'sam3 import OK' at the end, you're good.
+
+# ============================================================
+# Optional: faster SAM3 inference with flash-attn-3
+# ============================================================
+# pip install einops
+# pip install flash-attn-3 --no-deps --index-url https://download.pytorch.org/whl/cu128

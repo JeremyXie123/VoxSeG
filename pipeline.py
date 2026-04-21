@@ -15,6 +15,12 @@ import argparse
 import os
 import shutil
 import torch
+
+# Workaround for CUDA 12.6 + GCC 15 incompatibility
+# Use GCC 13 which is officially supported by CUDA 12.6
+os.environ.setdefault("CC", "/usr/bin/gcc-13")
+os.environ.setdefault("CXX", "/usr/bin/g++-13")
+
 import numpy as np
 import polyscope as ps
 
@@ -24,7 +30,7 @@ from core.ui import PromptBoxUI
 from stages.rendering import render_splat_views
 from stages.segmentation import generate_sam_masks
 from stages.optimize import BasicGrid, optimize_voxel_grid
-from stages.evaluation import plot_training_metrics, visualize_batch_grid
+from stages.evaluation import plot_training_metrics, visualize_batch_grid, compute_2d_mask_metrics, save_2d_mask_metrics, compute_geometry_metrics
 import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------------
@@ -62,6 +68,11 @@ if __name__ == "__main__":
     parser.add_argument("--iso_level", type=float, default=0.5, help="Isosurface level")
     parser.add_argument("--batch_size", type=int, default=32, help="Views per optimization step")
     parser.add_argument("--metric", type=str, default="bce", choices=["bce", "mse", "kl", "mi"])
+    parser.add_argument("--sam_threshold", type=float, default=0.25, help="SAM3 confidence threshold (default 0.25, library default 0.5)")
+    parser.add_argument("--eval_threshold", type=float, default=0.5, help="Binarization threshold for phi-grid rendered masks when computing F1/IoU")
+    parser.add_argument("--gt_mesh", type=str, default="", help="Optional ground-truth .off mesh path; if given, Chamfer distance is computed against it")
+    parser.add_argument("--chamfer_samples", type=int, default=100_000, help="Points sampled on each surface for Chamfer computation")
+    parser.add_argument("--chamfer_no_align", action="store_true", help="Skip ICP alignment before Chamfer (compare in raw unit-normalized frame)")
     parser.add_argument("--show", type=bool, default=True, help="Whether to show plots or just save them")
     
     # Evaluation
@@ -103,10 +114,13 @@ if __name__ == "__main__":
     box_ui = PromptBoxUI(args, default_center)
     box_ui.register()
     
-    # Set UI callback and show
+    # Set UI callback and show (skip interactive step when box is scripted)
     ps.set_user_callback(box_ui.make_ui_callback())
-    print("\n[Polyscope] Adjust the box, then close the window to continue...")
-    ps.show()
+    if args.box_size is None:
+        print("\n[Polyscope] Adjust the box, then close the window to continue...")
+        ps.show()
+    else:
+        print("\n[Polyscope] --box_size provided, skipping interactive adjustment.")
     
     # -------------------------------------------------------------------------
     # Phase 2: Extract parameters and build CameraState
@@ -222,7 +236,29 @@ if __name__ == "__main__":
     
     print("\n[Eval] Saving optimization metrics...")
     plot_training_metrics(history, filename=f"{log_path}/loss_graph.png", show=args.show)
-    
+
+    print("[Eval] Computing 2D mask F1/IoU on training views...")
+    metrics = compute_2d_mask_metrics(phi_grid, seg_result, cams, args, device, threshold=args.eval_threshold)
+
+    if args.gt_mesh:
+        if not os.path.isfile(args.gt_mesh):
+            print(f"[Eval] WARNING: --gt_mesh {args.gt_mesh} not found; skipping Chamfer.")
+        else:
+            print(f"[Eval] Computing Chamfer distance against {args.gt_mesh}...")
+            geom = compute_geometry_metrics(
+                phi_grid, cams, args.gt_mesh,
+                num_samples=args.chamfer_samples,
+                align=not args.chamfer_no_align,
+            )
+            metrics["geometry"] = geom
+            if "chamfer_l2" in geom:
+                print(f"  Chamfer L2:     {geom['chamfer_l2']:.4f}")
+                print(f"  Chamfer L2 sq:  {geom['chamfer_l2_squared']:.6f}")
+                for k in ("f_at_0.01", "f_at_0.02", "f_at_0.05"):
+                    print(f"  {k}:      {geom[k]:.4f}")
+
+    save_2d_mask_metrics(metrics, f"{log_path}/mask_metrics.json")
+
     print("[Eval] Generating test views...")
     test_viewmats, _ = get_batch_viewmats(
         center=box_ui.get_center(),
