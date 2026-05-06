@@ -77,7 +77,7 @@ if __name__ == "__main__":
     parser.add_argument("--gt_mesh", type=str, default="", help="Optional ground-truth .off mesh path; if given, Chamfer distance is computed against it")
     parser.add_argument("--chamfer_samples", type=int, default=100_000, help="Points sampled on each surface for Chamfer computation")
     parser.add_argument("--chamfer_no_align", action="store_true", help="Skip ICP alignment before Chamfer (compare in raw unit-normalized frame)")
-    parser.add_argument("--show", type=bool, default=True, help="Whether to show plots or just save them")
+    parser.add_argument("--hide_visualizations", action="store_true", help="Skip all visualizations (renders, metrics graphs, etc.) and only print final metrics")
 
     args = parser.parse_args()
     
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     # Set UI callback and show (skip interactive step when box is scripted)
     ps.set_user_callback(box_ui.make_ui_callback())
 
-    if args.show:
+    if not args.hide_visualizations:
         ps.show()
 
     # -------------------------------------------------------------------------
@@ -216,7 +216,7 @@ if __name__ == "__main__":
     viz_masks = seg_result.masks[:num_viz]
     viz_masks_rgb = np.repeat(viz_masks[:, :, :, None], 3, axis=-1).astype(np.float32)
     combined_viz = np.concatenate([viz_renders, viz_masks_rgb], axis=0)
-    visualize_batch_grid(combined_viz, num_cols=num_viz, filename=f"{log_path}/inputs_and_masks.png", show=args.show)
+    visualize_batch_grid(combined_viz, num_cols=num_viz, filename=f"{log_path}/inputs_and_masks.png", show=not args.hide_visualizations)
 
     box_ui.clear_camera_previews()
     ps.get_curve_network(box_ui.BOX_NAME).set_enabled(False)
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     
     print("\n[Eval] Saving optimization metrics...")
-    plot_training_metrics(history, filename=f"{log_path}/loss_graph.png", show=args.show)
+    plot_training_metrics(history, filename=f"{log_path}/loss_graph.png", show=not args.hide_visualizations)
 
     print("[Eval] Computing 2D mask F1/IoU on training views...")
     metrics = compute_2d_mask_metrics(phi_grid, seg_result, cams, args, device, threshold=args.eval_threshold)
@@ -296,7 +296,7 @@ if __name__ == "__main__":
     combined = np.concatenate([original_imgs, phi_masks_rgb], axis=0)
 
     os.makedirs(log_path, exist_ok=True)
-    visualize_batch_grid(combined, num_cols=args.num_test_views, filename=f"{log_path}/test_views.png", show=args.show)
+    visualize_batch_grid(combined, num_cols=args.num_test_views, filename=f"{log_path}/test_views.png", show=not args.hide_visualizations)
     
     # Reopen oplyscope to show the final optimized grid with cameras and blended SAM masks
     print("\n[Polyscope] Final visualization...")
@@ -304,7 +304,7 @@ if __name__ == "__main__":
     widget_size = compute_widget_focal_length(cams.cam_radius, args.cameras_per_ring)
     box_ui.register_cameras(cams.viewmats, cams.Ks, masked_rgbs=seg_result.blended_images, widget_focal_length=widget_size, color=(0.5, 0.5, 0.5))
     
-    if args.show:
+    if not args.hide_visualizations:
         ps.show()
     
     print("\n[Done]")
