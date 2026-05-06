@@ -289,3 +289,4 @@ cameras/
 *.png
 *.pkl
 *.mp4
+*.json
