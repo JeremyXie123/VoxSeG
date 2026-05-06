@@ -4,11 +4,6 @@ This is the repository for the VoxSeG paper.
 # Installation
 The order of installation is important, given many libraries we use require specific versions of pytorch (gsplat, sam3, etc.)
 
-
-# File Setup
-File arguments (e.g. input splat) are resolved relative to the current working directory.
-- Splats should go in `splats/*.ply`
-
 # Running the main script
 The script uses argparse to run the program from the command line for reproducability and testing. The meaning of each argument can be found in the code, or through `python3 pipeline.py --help`
 - `python3 pipeline.py --input splats/truck.ply --box_center 0.2128 0.2911 0.4706 --box_size 5.7407 1.7651 2.1704 --box_angles 170.42 2.86 -178.06 --label="Truck" --resolution 512 --focal_length=300 --num_iters=50 --padding=1.25`

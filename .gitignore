@@ -275,18 +275,22 @@ imgui.ini
 # Vscode configuration files
 .vscode/
 
-# Ignore SAM
-*.pt
-*.yaml
-graphs/
-splats/
-cameras/
+# Ignore SAM3
+sam3/
 
 # Ignore CUDA
 *.run
 *.sh
 
+# Ignore generated files
+graphs/
+splats/
+cameras/
+logs/
+
 *.png
 *.pkl
 *.mp4
 *.json
+*.pt
+*.yaml

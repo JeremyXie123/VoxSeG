@@ -58,7 +58,7 @@ if __name__ == "__main__":
     parser.add_argument("--elevation_max", type=float, default=15.0, help="Max elevation angle")
     parser.add_argument("--resolution", type=int, default=512, help="Render resolution")
     
-    # Hyperparameters
+    # Hyperparameters (affects result)
     parser.add_argument("--grid_resolution", type=int, default=128, help="Voxel grid resolution")
     parser.add_argument("--num_iters", type=int, default=300, help="Optimization iterations")
     parser.add_argument("--num_samples", type=int, default=50, help="Samples per ray")
