@@ -61,6 +61,7 @@ pip install gsplat
 ```bash
 pip install polyscope
 pip install matplotlib plyfile scikit-image
+pip install open3d scipy
 ```
 
 ### Install Hugging Face for sam3 model weights
