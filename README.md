@@ -1,4 +1,6 @@
 # VoxSeG
+<img width="1500" height="1000" alt="image" src="https://github.com/user-attachments/assets/db667c44-cd02-4150-9fd4-193ea38a4e38" />
+
 This is the repository for the VoxSeG paper.
 
 # Installation
@@ -98,13 +100,23 @@ print('sam3 import OK')
 # Running the main script
 The script uses argparse to run the program from the command line for reproducability and testing. The meaning of each argument can be found in the code, or through `python3 pipeline.py --help`.
 
-If polyscope opens but no scene is rendered, run `rm -rf ~/.cache/torch_extensions/` to force gsplat to recompile.
-
+After placing your `.ply` files in `splats/`, you can run any of these as an example:
 - `python3 pipeline.py --input splats/truck.ply --box_center 0.2128 0.2911 0.4706 --box_size 5.7407 1.7651 2.1704 --box_angles 170.42 2.86 -178.06 --label="Truck" --resolution 512 --focal_length=300 --num_iters=50 --padding=1.25`
 - `python3 pipeline.py --input splats/train.ply --box_center -0.5892 -0.2067 -0.0802 --box_size 6.6744 1.9212 1.6552  --box_angles -173.45 28.43 -179.19 --label="Train" --resolution 512 --focal_length 300.0 --num_iters=50 --padding 1.50`
 - `python3 pipeline.py --input splats/panther.ply --box_center -0.2041 0.2134 0.5350 --box_size 4.4317 2.1076 2.3953 --box_angles 0.00 43.63 0.00 --label="Tank" --resolution 512 --focal_length 300.0 --num_iters=50 --padding 1.50 `
 - `python3 pipeline.py --input splats/ignatius.ply --box_center 0.3738 0.1920 -0.0366 --box_size 1.9203 2.8647 1.7559 --box_angles 171.64 39.65 174.66 --label="Statue" --resolution 512 --focal_length 300.0 --num_iters=50 --padding 1.50`
 - `python3 pipeline.py --input splats/m60.ply --box_center -0.4267 0.0921 0.2831 --box_size 4.5081 2.1180 2.4946 --box_angles 96.58 83.57 96.54 --label="Tank" --resolution 512 --focal_length 300.0 --num_iters=50 --padding 1.50`
+
+This will open up a window in polyscope, where you can adjust the bounding box and text prompts for SAM3 and sampling options for camera views:
+- **If polyscope opens but no scene is rendered, run `rm -rf ~/.cache/torch_extensions/` to force gsplat to recompile.**
+<img width="1702" height="926" alt="image" src="https://github.com/user-attachments/assets/129d7b38-4b45-42b6-9299-65aed02f395c" />
+
+
+After closing the polyscope window, the pipeline will run.
+
+Various visualizations will be shown and can be ignored with the `--hide_visualizations` command argument. 
+
+After the pipeline is complete, polyscope will reopen again with the voxelized grid shown.
 
 # Example Gaussians 
 Here are some example public gaussian splat repositories you can download `.ply` files from.
