@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 from plyfile import PlyData
 from dataclasses import dataclass
 

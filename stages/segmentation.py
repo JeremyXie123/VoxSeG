@@ -1,4 +1,3 @@
-import os
 import sys
 import gc
 import pathlib
@@ -7,7 +6,7 @@ import numpy as np
 from PIL import Image
 from dataclasses import dataclass
 
-from core.camera import CameraState, project_points
+from core.camera import CameraState
 
 
 @dataclass
@@ -96,7 +95,7 @@ def generate_sam_masks(
         # Fallback: use known location relative to this file
         bpe_path = str(pathlib.Path(__file__).parent.parent / "sam3" / "sam3" / "assets" / "bpe_simple_vocab_16e6.txt.gz")
     
-    print(f"[SAM3] Loading model...")
+    print("[SAM3] Loading model...")
     model = build_sam3_image_model(bpe_path=bpe_path, device="cuda")
     threshold = getattr(args, "sam_threshold", 0.5)
     processor = Sam3Processor(model, confidence_threshold=threshold)
@@ -169,7 +168,7 @@ def generate_sam_masks(
             
             # Reject empty masks (shouldn't happen if best_count > 0, but safety check)
             if not mask.any():
-                print(f"REJECTED - empty mask")
+                print("REJECTED - empty mask")
                 continue
             
             masks_list.append(mask)

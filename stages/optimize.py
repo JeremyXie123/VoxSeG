@@ -229,7 +229,6 @@ class BasicGrid(PhiGrid):
 # UNIFIED PIPELINE ENTRY
 # --------------------------------------------------------------------------- #
 
-import os
 def optimize_voxel_grid(grid: PhiGrid, seg_result: SegmentationResult, cams: CameraState, args, device: torch.device, path:str):
     history = {'total_loss': [], 'mask_loss': [], 'smooth_loss': [], 'time': []}
     start_time = time.time()

@@ -311,7 +311,7 @@ class PromptBoxUI:
     def print_properties(self):
         """Print box properties for reproducible scripted runs."""
         center, size, angles_deg = self.get_properties()
-        print(f"\n[Box Properties] For scripted runs:")
+        print("\n[Box Properties] For scripted runs:")
         print(f"  --box_center {center[0]:.4f} {center[1]:.4f} {center[2]:.4f}")
         print(f"  --box_size {size[0]:.4f} {size[1]:.4f} {size[2]:.4f}")
         print(f"  --box_angles {angles_deg[0]:.2f} {angles_deg[1]:.2f} {angles_deg[2]:.2f}")
