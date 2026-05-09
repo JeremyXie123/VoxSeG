@@ -91,9 +91,9 @@ print('sam3 import OK')
 # Runnable script explanations
 - `pipeline.py` is the main cli/gui program for running the pipeline.
 - `hypercomp.py` can be used to generate plots of parameter sweeps, e.g. values of `beta` for comparison.
-- `eval_mask_metrics.py` 
-- `baseline_opacity.py`
-- `compare_voxseg_sugar_metrics.py`
+- `baseline_opacity.py` computes a "no-optimization" Chamfer baseline by treating high-opacity Gaussian means directly as a predicted point cloud against the ModelNet GT meshes.
+- `eval_mask_metrics.py` recomputes 2D mask F1/IoU at a chosen threshold from a saved eval_bundle.pt, avoiding a full re-render and re-segmentation.
+- `compare_voxseg_sugar_metrics.py` benchmarks the pipeline's geometry metrics against a SuGaR baseline.
 
 # Running the main script
 The script uses argparse to run the program from the command line for reproducability and testing. The meaning of each argument can be found in the code, or through `python3 pipeline.py --help`.
@@ -109,13 +109,10 @@ If polyscope opens but no scene is rendered, run `rm -rf ~/.cache/torch_extensio
 # Example Gaussians 
 Here are some example public gaussian splat repositories you can download `.ply` files from.
 
-## Splats With Ground Truth Geometry
-- `TODO`
+## Splats With Ground Truth Geometry (.ply)
+- https://huggingface.co/datasets/ShapeSplats/ModelNet_Splats/tree/main
 
-## Single Objects
-- https://huggingface.co/datasets/ShapeSplats/ModelNet_Splats
-
-## Scenes
+## Scenes (.ply)
 - https://huggingface.co/datasets/rishitdagli/nerf-gs-datasets/tree/main
 - https://huggingface.co/datasets/Voxel51/gaussian_splatting/tree/main/FO_dataset
 
