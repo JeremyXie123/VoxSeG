@@ -1,7 +1,10 @@
 # VoxSeG
 <img width="1500" height="1000" alt="image" src="https://github.com/user-attachments/assets/db667c44-cd02-4150-9fd4-193ea38a4e38" />
 
-This is the repository for the VoxSeG paper.
+This is the code repository for **VoxSeG**, a post-processing pipeline that recovers the structured occupancy geometry of a segmented object from a frozen 3D Gaussian splat.
+
+## Report
+[Unpublished course report (CSC494, University of Toronto, 2026)](VoxSeg_Report.pdf)
 
 # Installation
 The order of installation is important, given many libraries we use require specific versions of pytorch (gsplat, sam3, etc.).
@@ -50,7 +53,7 @@ pip install -e .
 cd ..
 
 pip install einops pycocotools psutil
-pip install "numpy<2" "setuptools<81" "tifffile<2025
+pip install "numpy<2" "setuptools<81" "tifffile<2025"
 ```
 
 ### Install gsplat and its dependencies
@@ -73,7 +76,7 @@ pip install huggingface_hub
 hf auth login
 ```
 
-### Verify everything was installed propperly
+### Verify everything was installed properly
 ```bash
 pip check   # should print "No broken requirements found."
 
@@ -98,7 +101,7 @@ print('sam3 import OK')
 - `compare_voxseg_sugar_metrics.py` benchmarks the pipeline's geometry metrics against a SuGaR baseline.
 
 # Running the main script
-The script uses argparse to run the program from the command line for reproducability and testing. The meaning of each argument can be found in the code, or through `python3 pipeline.py --help`.
+The script uses argparse to run the program from the command line for reproducibility and testing. The meaning of each argument can be found in the code, or through `python3 pipeline.py --help`.
 
 After placing your `.ply` files in `splats/`, you can run any of these as an example:
 - `python3 pipeline.py --input splats/truck.ply --box_center 0.2128 0.2911 0.4706 --box_size 5.7407 1.7651 2.1704 --box_angles 170.42 2.86 -178.06 --label="Truck" --resolution 512 --focal_length=300 --num_iters=50 --padding=1.25`
@@ -129,4 +132,4 @@ Here are some example public gaussian splat repositories you can download `.ply`
 - https://huggingface.co/datasets/Voxel51/gaussian_splatting/tree/main/FO_dataset
 
 # Extra Notes
-- The code was ran with CUDA 12.8, so it may not work for other versions.
+- The code was run with CUDA 12.8, so it may not work for other versions.
